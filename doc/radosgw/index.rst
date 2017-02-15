@@ -48,6 +48,7 @@ you may write data with one API and retrieve it with the other.
 	OpenStack Keystone Integration <keystone>
 	Multi-tenancy <multitenancy>
 	Compression <compression>
+	Server-Side Encryption <encryption>
 	troubleshooting
 	Manpage radosgw <../../man/8/radosgw>
 	Manpage radosgw-admin <../../man/8/radosgw-admin>
