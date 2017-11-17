@@ -18,6 +18,7 @@ class Entry;
 class Log : private Thread
 {
   Log **m_indirect_this;
+  log_clock clock;
 
   SubsystemMap *m_subs;
 
@@ -51,18 +52,19 @@ class Log : private Thread
 
   bool m_inject_segv;
 
-  void *entry();
+  void *entry() override;
 
   void _flush(EntryQueue *q, EntryQueue *requeue, bool crash);
 
   void _log_message(const char *s, bool crash);
 
 public:
-  explicit Log(SubsystemMap *s);
-  virtual ~Log();
+  Log(SubsystemMap *s);
+  ~Log() override;
 
   void set_flush_on_exit();
 
+  void set_coarse_timestamps(bool coarse);
   void set_max_new(int n);
   void set_max_recent(int n);
   void set_log_file(std::string fn);
@@ -82,7 +84,7 @@ public:
 
   shared_ptr<Graylog> graylog() { return m_graylog; }
 
-  Entry *create_entry(int level, int subsys);
+  Entry *create_entry(int level, int subsys, const char* msg = nullptr);
   Entry *create_entry(int level, int subsys, size_t* expected_size);
   void submit_entry(Entry *e);
 

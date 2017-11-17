@@ -55,10 +55,10 @@ public:
                 const std::string &dest_name);
 
 protected:
-  virtual void send_op();
-  virtual bool should_complete(int r);
+  void send_op() override;
+  bool should_complete(int r) override;
 
-  virtual journal::Event create_event(uint64_t op_tid) const {
+  journal::Event create_event(uint64_t op_tid) const override {
     return journal::RenameEvent(op_tid, m_dest_name);
   }
 
@@ -68,7 +68,7 @@ private:
   std::string m_source_oid;
   std::string m_dest_oid;
 
-  State m_state;
+  State m_state = STATE_READ_SOURCE_HEADER;
 
   bufferlist m_header_bl;
 

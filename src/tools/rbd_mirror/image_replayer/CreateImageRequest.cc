@@ -4,7 +4,6 @@
 #include "CreateImageRequest.h"
 #include "CloseImageRequest.h"
 #include "OpenImageRequest.h"
-#include "Utils.h"
 #include "common/errno.h"
 #include "common/WorkQueue.h"
 #include "cls/rbd/cls_rbd_client.h"
@@ -13,6 +12,7 @@
 #include "librbd/internal.h"
 #include "librbd/Utils.h"
 #include "librbd/image/CreateRequest.h"
+#include "librbd/image/CloneRequest.h"
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_rbd_mirror
@@ -21,7 +21,7 @@
                            << this << " " << __func__
 
 using librbd::util::create_context_callback;
-using librbd::util::create_rados_ack_callback;
+using librbd::util::create_rados_callback;
 
 namespace rbd {
 namespace mirror {
@@ -33,13 +33,14 @@ CreateImageRequest<I>::CreateImageRequest(librados::IoCtx &local_io_ctx,
                                           const std::string &global_image_id,
                                           const std::string &remote_mirror_uuid,
                                           const std::string &local_image_name,
+					  const std::string &local_image_id,
                                           I *remote_image_ctx,
                                           Context *on_finish)
   : m_local_io_ctx(local_io_ctx), m_work_queue(work_queue),
     m_global_image_id(global_image_id),
     m_remote_mirror_uuid(remote_mirror_uuid),
-    m_local_image_name(local_image_name), m_remote_image_ctx(remote_image_ctx),
-    m_on_finish(on_finish) {
+    m_local_image_name(local_image_name), m_local_image_id(local_image_id),
+    m_remote_image_ctx(remote_image_ctx), m_on_finish(on_finish) {
 }
 
 template <typename I>
@@ -74,12 +75,33 @@ void CreateImageRequest<I>::create_image() {
   image_options.set(RBD_IMAGE_OPTION_STRIPE_COUNT,
                     m_remote_image_ctx->stripe_count);
 
-  std::string id = librbd::util::generate_image_id(m_local_io_ctx);
+  // Determine the data pool for the local image as follows:
+  // 1. If the local pool has a default data pool, use it.
+  // 2. If the remote image has a data pool different from its metadata pool and
+  //    a pool with the same name exists locally, use it.
+  // 3. Don't set the data pool explicitly.
+  std::string data_pool;
+  librados::Rados local_rados(m_local_io_ctx);
+  auto default_data_pool = g_ceph_context->_conf->get_val<std::string>("rbd_default_data_pool");
+  auto remote_md_pool = m_remote_image_ctx->md_ctx.get_pool_name();
+  auto remote_data_pool = m_remote_image_ctx->data_ctx.get_pool_name();
+
+  if (default_data_pool != "") {
+    data_pool = default_data_pool;
+  } else if (remote_data_pool != remote_md_pool) {
+    if (local_rados.pool_lookup(remote_data_pool.c_str()) >= 0) {
+      data_pool = remote_data_pool;
+    }
+  }
+
+  if (data_pool != "") {
+    image_options.set(RBD_IMAGE_OPTION_DATA_POOL, data_pool);
+  }
 
   librbd::image::CreateRequest<I> *req = librbd::image::CreateRequest<I>::create(
-    m_local_io_ctx, m_local_image_name, id, m_remote_image_ctx->size,
-    image_options, m_global_image_id, m_remote_mirror_uuid, false,
-    m_remote_image_ctx->op_work_queue, ctx);
+    m_local_io_ctx, m_local_image_name, m_local_image_id,
+    m_remote_image_ctx->size, image_options, m_global_image_id,
+    m_remote_mirror_uuid, false, m_remote_image_ctx->op_work_queue, ctx);
   req->send();
 }
 
@@ -102,7 +124,7 @@ void CreateImageRequest<I>::get_parent_global_image_id() {
   librados::ObjectReadOperation op;
   librbd::cls_client::mirror_image_get_start(&op, m_remote_parent_spec.image_id);
 
-  librados::AioCompletion *aio_comp = create_rados_ack_callback<
+  librados::AioCompletion *aio_comp = create_rados_callback<
     CreateImageRequest<I>,
     &CreateImageRequest<I>::handle_get_parent_global_image_id>(this);
   m_out_bl.clear();
@@ -149,7 +171,7 @@ void CreateImageRequest<I>::get_local_parent_image_id() {
   librbd::cls_client::mirror_image_get_image_id_start(
     &op, m_parent_global_image_id);
 
-  librados::AioCompletion *aio_comp = create_rados_ack_callback<
+  librados::AioCompletion *aio_comp = create_rados_callback<
     CreateImageRequest<I>,
     &CreateImageRequest<I>::handle_get_local_parent_image_id>(this);
   m_out_bl.clear();
@@ -193,7 +215,7 @@ void CreateImageRequest<I>::open_remote_parent_image() {
     &CreateImageRequest<I>::handle_open_remote_parent_image>(this);
   OpenImageRequest<I> *request = OpenImageRequest<I>::create(
     m_remote_parent_io_ctx, &m_remote_parent_image_ctx,
-    m_remote_parent_spec.image_id, true, m_work_queue, ctx);
+    m_remote_parent_spec.image_id, true, ctx);
   request->send();
 }
 
@@ -218,8 +240,8 @@ void CreateImageRequest<I>::open_local_parent_image() {
     CreateImageRequest<I>,
     &CreateImageRequest<I>::handle_open_local_parent_image>(this);
   OpenImageRequest<I> *request = OpenImageRequest<I>::create(
-    m_local_parent_io_ctx, &m_local_parent_image_ctx, m_local_parent_spec.image_id,
-    true, m_work_queue, ctx);
+    m_local_parent_io_ctx, &m_local_parent_image_ctx,
+    m_local_parent_spec.image_id, true, ctx);
   request->send();
 }
 
@@ -260,7 +282,9 @@ void CreateImageRequest<I>::set_local_parent_snap() {
   Context *ctx = create_context_callback<
     CreateImageRequest<I>,
     &CreateImageRequest<I>::handle_set_local_parent_snap>(this);
-  m_local_parent_image_ctx->state->snap_set(m_parent_snap_name, ctx);
+  m_local_parent_image_ctx->state->snap_set(cls::rbd::UserSnapshotNamespace(),
+					    m_parent_snap_name,
+					    ctx);
 }
 
 template <typename I>
@@ -281,23 +305,20 @@ template <typename I>
 void CreateImageRequest<I>::clone_image() {
   dout(20) << dendl;
 
-  // TODO: librbd should provide an AIO image clone method -- this is
-  //       blocking so we execute in our worker thread
-  Context *ctx = new FunctionContext([this](int r) {
-      RWLock::RLocker snap_locker(m_remote_image_ctx->snap_lock);
+  librbd::ImageOptions opts;
+  opts.set(RBD_IMAGE_OPTION_FEATURES, m_remote_image_ctx->features);
+  opts.set(RBD_IMAGE_OPTION_ORDER, m_remote_image_ctx->order);
+  opts.set(RBD_IMAGE_OPTION_STRIPE_UNIT, m_remote_image_ctx->stripe_unit);
+  opts.set(RBD_IMAGE_OPTION_STRIPE_COUNT, m_remote_image_ctx->stripe_count);
 
-      librbd::ImageOptions opts;
-      opts.set(RBD_IMAGE_OPTION_FEATURES, m_remote_image_ctx->features);
-      opts.set(RBD_IMAGE_OPTION_ORDER, m_remote_image_ctx->order);
-      opts.set(RBD_IMAGE_OPTION_STRIPE_UNIT, m_remote_image_ctx->stripe_unit);
-      opts.set(RBD_IMAGE_OPTION_STRIPE_COUNT, m_remote_image_ctx->stripe_count);
+  using klass = CreateImageRequest<I>;
+  Context *ctx = create_context_callback<klass, &klass::handle_clone_image>(this);
 
-      r = utils::clone_image(m_local_parent_image_ctx, m_local_io_ctx,
-                             m_local_image_name.c_str(), opts,
-                             m_global_image_id, m_remote_mirror_uuid);
-      handle_clone_image(r);
-    });
-  m_work_queue->queue(ctx, 0);
+  librbd::image::CloneRequest<I> *req = librbd::image::CloneRequest<I>::create(
+    m_local_parent_image_ctx, m_local_io_ctx, m_local_image_name,
+    m_local_image_id, opts, m_global_image_id, m_remote_mirror_uuid,
+    m_remote_image_ctx->op_work_queue, ctx);
+  req->send();
 }
 
 template <typename I>
@@ -320,7 +341,7 @@ void CreateImageRequest<I>::close_local_parent_image() {
     CreateImageRequest<I>,
     &CreateImageRequest<I>::handle_close_local_parent_image>(this);
   CloseImageRequest<I> *request = CloseImageRequest<I>::create(
-    &m_local_parent_image_ctx, m_work_queue, false, ctx);
+    &m_local_parent_image_ctx, ctx);
   request->send();
 }
 
@@ -342,7 +363,7 @@ void CreateImageRequest<I>::close_remote_parent_image() {
     CreateImageRequest<I>,
     &CreateImageRequest<I>::handle_close_remote_parent_image>(this);
   CloseImageRequest<I> *request = CloseImageRequest<I>::create(
-    &m_remote_parent_image_ctx, m_work_queue, false, ctx);
+    &m_remote_parent_image_ctx, ctx);
   request->send();
 }
 

@@ -18,15 +18,19 @@
 #include "msg/Message.h"
 
 class MBackfillReserve : public Message {
-  static const int HEAD_VERSION = 3;
-  static const int COMPAT_VERSION = 1;
+  static const int HEAD_VERSION = 4;
+  static const int COMPAT_VERSION = 4;
 public:
   spg_t pgid;
   epoch_t query_epoch;
   enum {
-    REQUEST = 0,
-    GRANT = 1,
-    REJECT = 2,
+    REQUEST = 0,   // primary->replica: please reserve a slot
+    GRANT = 1,     // replica->primary: ok, i reserved it
+    REJECT = 2,    // replica->primary: sorry, try again later (*)
+    RELEASE = 3,   // primary->replcia: release the slot i reserved before
+    TOOFULL = 4,   // replica->primary: too full, stop backfilling
+    REVOKE = 5,    // replica->primary: i'm taking back the slot i gave you
+    // (*) NOTE: prior to luminous, REJECT was overloaded to also mean release
   };
   uint32_t type;
   uint32_t priority;
@@ -41,11 +45,11 @@ public:
       pgid(pgid), query_epoch(query_epoch),
       type(type), priority(prio) {}
 
-  const char *get_type_name() const {
+  const char *get_type_name() const override {
     return "MBackfillReserve";
   }
 
-  void print(ostream& out) const {
+  void print(ostream& out) const override {
     out << "MBackfillReserve ";
     switch (type) {
     case REQUEST:
@@ -57,29 +61,44 @@ public:
     case REJECT:
       out << "REJECT ";
       break;
+    case RELEASE:
+      out << "RELEASE ";
+      break;
+    case TOOFULL:
+      out << "TOOFULL ";
+      break;
+    case REVOKE:
+      out << "REVOKE ";
+      break;
     }
     out << " pgid: " << pgid << ", query_epoch: " << query_epoch;
     if (type == REQUEST) out << ", prio: " << priority;
     return;
   }
 
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(pgid.pgid, p);
     ::decode(query_epoch, p);
     ::decode(type, p);
-    if (header.version > 1)
-      ::decode(priority, p);
-    else
-      priority = 0;
-    if (header.version >= 3)
-      ::decode(pgid.shard, p);
-    else
-      pgid.shard = shard_id_t::NO_SHARD;
-
+    ::decode(priority, p);
+    ::decode(pgid.shard, p);
   }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
+    if (!HAVE_FEATURE(features, RECOVERY_RESERVATION_2)) {
+      header.version = 3;
+      header.compat_version = 3;
+      ::encode(pgid.pgid, payload);
+      ::encode(query_epoch, payload);
+      ::encode((type == RELEASE || type == TOOFULL || type == REVOKE) ?
+	       REJECT : type, payload);
+      ::encode(priority, payload);
+      ::encode(pgid.shard, payload);
+      return;
+    }
+    header.version = HEAD_VERSION;
+    header.compat_version = COMPAT_VERSION;
     ::encode(pgid.pgid, payload);
     ::encode(query_epoch, payload);
     ::encode(type, payload);

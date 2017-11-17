@@ -522,7 +522,7 @@ Options
 
 .. option:: --fs-type
 
-	Filesystem to use to format disk ``(xfs, btrfs or ext4)``.
+	Filesystem to use to format disk ``(xfs, btrfs or ext4)``.  Note that support for btrfs and ext4 is no longer tested or recommended; please use xfs.
 
 .. option:: --fsid
 
@@ -597,7 +597,7 @@ Availability
 ============
 
 :program:`ceph-deploy` is part of Ceph, a massively scalable, open-source, distributed storage system. Please refer to
-the documentation at http://ceph.com/ceph-deploy/docs for more information.
+the documentation at https://ceph.com/ceph-deploy/docs for more information.
 
 
 See also

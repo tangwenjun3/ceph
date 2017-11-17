@@ -11,13 +11,6 @@
  */
 
 #include "TrackedOp.h"
-#include "common/Formatter.h"
-#include <iostream>
-#include <vector>
-#include "common/debug.h"
-#include "common/config.h"
-#include "msg/Message.h"
-#include "include/assert.h"
 
 #define dout_context cct
 #define dout_subsys ceph_subsys_optracker
@@ -34,6 +27,7 @@ void OpHistory::on_shutdown()
   Mutex::Locker history_lock(ops_history_lock);
   arrived.clear();
   duration.clear();
+  slow_op.clear();
   shutdown = true;
 }
 
@@ -44,6 +38,8 @@ void OpHistory::insert(utime_t now, TrackedOpRef op)
     return;
   duration.insert(make_pair(op->get_duration(), op));
   arrived.insert(make_pair(op->get_initiated(), op));
+  if (op->get_duration() >= history_slow_op_threshold)
+    slow_op.insert(make_pair(op->get_initiated(), op));
   cleanup(now);
 }
 
@@ -64,9 +60,15 @@ void OpHistory::cleanup(utime_t now)
 	duration.begin()->second));
     duration.erase(duration.begin());
   }
+
+  while (slow_op.size() > history_slow_op_size) {
+    slow_op.erase(make_pair(
+	slow_op.begin()->second->get_initiated(),
+	slow_op.begin()->second));
+  }
 }
 
-void OpHistory::dump_ops(utime_t now, Formatter *f)
+void OpHistory::dump_ops(utime_t now, Formatter *f, set<string> filters)
 {
   Mutex::Locker history_lock(ops_history_lock);
   cleanup(now);
@@ -79,9 +81,46 @@ void OpHistory::dump_ops(utime_t now, Formatter *f)
 	   arrived.begin();
 	 i != arrived.end();
 	 ++i) {
+      if (!i->second->filter_out(filters))
+        continue;
       f->open_object_section("op");
       i->second->dump(now, f);
       f->close_section();
+    }
+    f->close_section();
+  }
+  f->close_section();
+}
+
+void OpHistory::dump_ops_by_duration(utime_t now, Formatter *f, set<string> filters)
+{
+  Mutex::Locker history_lock(ops_history_lock);
+  cleanup(now);
+  f->open_object_section("op_history");
+  f->dump_int("size", history_size);
+  f->dump_int("duration", history_duration);
+  {
+    f->open_array_section("ops");
+    if (arrived.size()) {
+      vector<pair<double, TrackedOpRef> > durationvec;
+      durationvec.reserve(arrived.size());
+
+      for (set<pair<utime_t, TrackedOpRef> >::const_iterator i =
+	     arrived.begin();
+	   i != arrived.end();
+	   ++i) {
+	if (!i->second->filter_out(filters))
+	  continue;
+	durationvec.push_back(pair<double, TrackedOpRef>(i->second->get_duration(), i->second));
+      }
+
+      sort(durationvec.begin(), durationvec.end());
+
+      for (auto i = durationvec.rbegin(); i != durationvec.rend(); ++i) {
+	f->open_object_section("op");
+	i->second->dump(now, f);
+	f->close_section();
+      }
     }
     f->close_section();
   }
@@ -117,23 +156,62 @@ OpTracker::~OpTracker() {
   }
 }
 
-bool OpTracker::dump_historic_ops(Formatter *f)
+bool OpTracker::dump_historic_ops(Formatter *f, bool by_duration, set<string> filters)
 {
-  RWLock::RLocker l(lock);
   if (!tracking_enabled)
     return false;
 
+  RWLock::RLocker l(lock);
   utime_t now = ceph_clock_now();
-  history.dump_ops(now, f);
+  if (by_duration) {
+    history.dump_ops_by_duration(now, f, filters);
+  } else {
+    history.dump_ops(now, f, filters);
+  }
   return true;
 }
 
-bool OpTracker::dump_ops_in_flight(Formatter *f, bool print_only_blocked)
+void OpHistory::dump_slow_ops(utime_t now, Formatter *f, set<string> filters)
 {
-  RWLock::RLocker l(lock);
+  Mutex::Locker history_lock(ops_history_lock);
+  cleanup(now);
+  f->open_object_section("OpHistory slow ops");
+  f->dump_int("num to keep", history_slow_op_size);
+  f->dump_int("threshold to keep", history_slow_op_threshold);
+  {
+    f->open_array_section("Ops");
+    for (set<pair<utime_t, TrackedOpRef> >::const_iterator i =
+	   slow_op.begin();
+	 i != slow_op.end();
+	 ++i) {
+      if (!i->second->filter_out(filters))
+        continue;
+      f->open_object_section("Op");
+      i->second->dump(now, f);
+      f->close_section();
+    }
+    f->close_section();
+  }
+  f->close_section();
+}
+
+bool OpTracker::dump_historic_slow_ops(Formatter *f, set<string> filters)
+{
   if (!tracking_enabled)
     return false;
 
+  RWLock::RLocker l(lock);
+  utime_t now = ceph_clock_now();
+  history.dump_slow_ops(now, f, filters);
+  return true;
+}
+
+bool OpTracker::dump_ops_in_flight(Formatter *f, bool print_only_blocked, set<string> filters)
+{
+  if (!tracking_enabled)
+    return false;
+
+  RWLock::RLocker l(lock);
   f->open_object_section("ops_in_flight"); // overall dump
   uint64_t total_ops_in_flight = 0;
   f->open_array_section("ops"); // list of TrackedOps
@@ -144,7 +222,9 @@ bool OpTracker::dump_ops_in_flight(Formatter *f, bool print_only_blocked)
     Mutex::Locker locker(sdata->ops_in_flight_lock_sharded);
     for (auto& op : sdata->ops_in_flight_sharded) {
       if (print_only_blocked && (now - op.get_initiated() <= complaint_time))
-	break;
+        break;
+      if (!op.filter_out(filters))
+        continue;
       f->open_object_section("op");
       op.dump(now, f);
       f->close_section(); // this TrackedOp
@@ -163,11 +243,11 @@ bool OpTracker::dump_ops_in_flight(Formatter *f, bool print_only_blocked)
 
 bool OpTracker::register_inflight_op(TrackedOp *i)
 {
-  RWLock::RLocker l(lock);
   if (!tracking_enabled)
     return false;
 
-  uint64_t current_seq = seq.inc();
+  RWLock::RLocker l(lock);
+  uint64_t current_seq = ++seq;
   uint32_t shard_index = current_seq % num_optracker_shards;
   ShardedTrackingData* sdata = sharded_in_flight_list[shard_index];
   assert(NULL != sdata);
@@ -194,10 +274,10 @@ void OpTracker::unregister_inflight_op(TrackedOp *i)
   }
   i->_unregistered();
 
-  RWLock::RLocker l(lock);
   if (!tracking_enabled)
     delete i;
   else {
+    RWLock::RLocker l(lock);
     i->state = TrackedOp::STATE_HISTORY;
     utime_t now = ceph_clock_now();
     history.insert(now, TrackedOpRef(i));
@@ -206,10 +286,10 @@ void OpTracker::unregister_inflight_op(TrackedOp *i)
 
 bool OpTracker::check_ops_in_flight(std::vector<string> &warning_vector, int *slow)
 {
-  RWLock::RLocker l(lock);
   if (!tracking_enabled)
     return false;
 
+  RWLock::RLocker l(lock);
   utime_t now = ceph_clock_now();
   utime_t too_old = now;
   too_old -= complaint_time;
@@ -329,7 +409,7 @@ void TrackedOp::mark_event_string(const string &event, utime_t stamp)
     events.push_back(Event(stamp, event));
     current = events.back().c_str();
   }
-  dout(6) <<  "seq: " << seq
+  dout(6) << " seq: " << seq
 	  << ", time: " << stamp
 	  << ", event: " << event
 	  << ", op: " << get_desc()
@@ -347,7 +427,7 @@ void TrackedOp::mark_event(const char *event, utime_t stamp)
     events.push_back(Event(stamp, event));
     current = event;
   }
-  dout(6) <<  "seq: " << seq
+  dout(6) << " seq: " << seq
 	  << ", time: " << stamp
 	  << ", event: " << event
 	  << ", op: " << get_desc()
@@ -365,7 +445,7 @@ void TrackedOp::dump(utime_t now, Formatter *f) const
   f->dump_float("age", now - get_initiated());
   f->dump_float("duration", get_duration());
   {
-    f->open_array_section("type_data");
+    f->open_object_section("type_data");
     _dump(f);
     f->close_section();
   }

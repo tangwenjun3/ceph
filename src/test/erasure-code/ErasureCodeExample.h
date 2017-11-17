@@ -35,35 +35,20 @@
 
 #define MINIMUM_TO_RECOVER 2u
 
-class ErasureCodeExample : public ErasureCode {
+class ErasureCodeExample final : public ErasureCode {
 public:
-  virtual ~ErasureCodeExample() {}
+  ~ErasureCodeExample() override {}
 
-  virtual int create_ruleset(const string &name,
+  int create_rule(const string &name,
 			     CrushWrapper &crush,
-			     ostream *ss) const {
-    return crush.add_simple_ruleset(name, "default", "host",
-				    "indep", pg_pool_t::TYPE_ERASURE, ss);
-  }
-  
-  virtual int minimum_to_decode(const set<int> &want_to_read,
-                                const set<int> &available_chunks,
-                                set<int> *minimum) {
-    if (includes(available_chunks.begin(), available_chunks.end(),
-		 want_to_read.begin(), want_to_read.end())) {
-      *minimum = want_to_read;
-      return 0;
-    } else if (available_chunks.size() >= MINIMUM_TO_RECOVER) {
-      *minimum = available_chunks;
-      return 0;
-    } else {
-      return -EIO;
-    }
+			     ostream *ss) const override {
+    return crush.add_simple_rule(name, "default", "host", "",
+				 "indep", pg_pool_t::TYPE_ERASURE, ss);
   }
 
-  virtual int minimum_to_decode_with_cost(const set<int> &want_to_read,
+  int minimum_to_decode_with_cost(const set<int> &want_to_read,
                                           const map<int, int> &available,
-                                          set<int> *minimum) {
+                                          set<int> *minimum) override {
     //
     // If one chunk is more expensive to fetch than the others,
     // recover it instead. For instance, if the cost reflects the
@@ -88,24 +73,24 @@ public:
 	 i != c2c.end();
 	 ++i)
       available_chunks.insert(i->first);
-    return minimum_to_decode(want_to_read, available_chunks, minimum);
+    return _minimum_to_decode(want_to_read, available_chunks, minimum);
   }
 
-  virtual unsigned int get_chunk_count() const {
+  unsigned int get_chunk_count() const override {
     return DATA_CHUNKS + CODING_CHUNKS;
   }
 
-  virtual unsigned int get_data_chunk_count() const {
+  unsigned int get_data_chunk_count() const override {
     return DATA_CHUNKS;
   }
 
-  virtual unsigned int get_chunk_size(unsigned int object_size) const {
+  unsigned int get_chunk_size(unsigned int object_size) const override {
     return ( object_size / DATA_CHUNKS ) + 1;
   }
 
-  virtual int encode(const set<int> &want_to_encode,
+  int encode(const set<int> &want_to_encode,
                      const bufferlist &in,
-                     map<int, bufferlist> *encoded) {
+                     map<int, bufferlist> *encoded) override {
     //
     // make sure all data chunks have the same length, allocating
     // padding if necessary.
@@ -138,15 +123,15 @@ public:
     return 0;
   }
 
-  virtual int encode_chunks(const set<int> &want_to_encode,
-			    map<int, bufferlist> *encoded) {
+  int encode_chunks(const set<int> &want_to_encode,
+			    map<int, bufferlist> *encoded) override {
     ceph_abort();
     return 0;
   }
 
-  virtual int decode(const set<int> &want_to_read,
-                     const map<int, bufferlist> &chunks,
-                     map<int, bufferlist> *decoded) {
+  int _decode(const set<int> &want_to_read,
+	      const map<int, bufferlist> &chunks,
+	      map<int, bufferlist> *decoded) {
     //
     // All chunks have the same size
     //
@@ -186,14 +171,14 @@ public:
     return 0;
   }
 
-  virtual int decode_chunks(const set<int> &want_to_read,
+  int decode_chunks(const set<int> &want_to_read,
 			    const map<int, bufferlist> &chunks,
-			    map<int, bufferlist> *decoded) {
+			    map<int, bufferlist> *decoded) override {
     ceph_abort();
     return 0;
   }
 
-  virtual const vector<int> &get_chunk_mapping() const {
+  const vector<int> &get_chunk_mapping() const override {
     static vector<int> mapping;
     return mapping;
   }

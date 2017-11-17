@@ -118,13 +118,14 @@ void RGWFCGXProcess::handle_request(RGWRequest* r)
 
   RGWFCGX fcgxfe(req->fcgx);
   auto real_client_io = rgw::io::add_reordering(
-                          rgw::io::add_buffering(
+                          rgw::io::add_buffering(cct,
                             rgw::io::add_chunking(
                               &fcgxfe)));
-  RGWRestfulIO client_io(&real_client_io);
+  RGWRestfulIO client_io(cct, &real_client_io);
 
  
-  int ret = process_request(store, rest, req, uri_prefix, &client_io, olog);
+  int ret = process_request(store, rest, req, uri_prefix,
+                            *auth_registry, &client_io, olog);
   if (ret < 0) {
     /* we don't really care about return code */
     dout(20) << "process_request() returned " << ret << dendl;

@@ -76,7 +76,9 @@ bool entity_addr_t::parse(const char *s, const char **end)
     newtype = TYPE_MSGR2;
   } else if (*s == '-') {
     *this = entity_addr_t();
-    *end = s + 1;
+    if (end) {
+      *end = s + 1;
+    }
     return true;
   }
 
@@ -138,6 +140,9 @@ bool entity_addr_t::parse(const char *s, const char **end)
     // parse a port, too!
     p++;
     int port = atoi(p);
+    if (port > MAX_PORT_NUMBER) {
+      return false;
+    }
     set_port(port);
     while (*p && *p >= '0' && *p <= '9')
       p++;
@@ -287,4 +292,23 @@ void entity_addrvec_t::generate_test_instances(list<entity_addrvec_t*>& ls)
   ls.push_back(new entity_addrvec_t());
   ls.back()->v.push_back(entity_addr_t());
   ls.back()->v.push_back(entity_addr_t());
+}
+
+std::string entity_addr_t::ip_only_to_str() const 
+{
+  const char *host_ip = NULL;
+  char addr_buf[INET6_ADDRSTRLEN];
+  switch (get_family()) {
+  case AF_INET:
+    host_ip = inet_ntop(AF_INET, &in4_addr().sin_addr, 
+                        addr_buf, INET_ADDRSTRLEN);
+    break;
+  case AF_INET6:
+    host_ip = inet_ntop(AF_INET6, &in6_addr().sin6_addr, 
+                        addr_buf, INET6_ADDRSTRLEN);
+    break;
+  default:
+    break;
+  }
+  return host_ip ? host_ip : "";
 }

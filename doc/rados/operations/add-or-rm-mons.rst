@@ -243,9 +243,9 @@ catch up with the current state of the cluster.
 
 If monitors discovered each other through the Ceph configuration file instead of
 through the monmap, it would introduce additional risks because the Ceph
-configuration files aren't updated and distributed automatically. Monitors
+configuration files are not updated and distributed automatically. Monitors
 might inadvertently use an older ``ceph.conf`` file, fail to recognize a
-monitor, fall out of a quorum, or develop a situation where `Paxos`_ isn't able
+monitor, fall out of a quorum, or develop a situation where `Paxos`_ is not able
 to determine the current state of the system accurately. Consequently,  making
 changes to an existing monitor's IP address must be done with  great care.
 
@@ -367,4 +367,4 @@ the monitors should operate successfully.
 
 .. _Manual Deployment: ../../../install/manual-deployment
 .. _Monitor Bootstrap: ../../../dev/mon-bootstrap
-.. _Paxos: http://en.wikipedia.org/wiki/Paxos_(computer_science)
+.. _Paxos: https://en.wikipedia.org/wiki/Paxos_(computer_science)

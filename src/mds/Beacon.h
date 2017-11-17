@@ -41,16 +41,16 @@ class Beacon : public Dispatcher
 {
 public:
   Beacon(CephContext *cct_, MonClient *monc_, std::string name);
-  ~Beacon();
+  ~Beacon() override;
 
   void init(MDSMap const *mdsmap);
   void shutdown();
 
-  bool ms_dispatch(Message *m);
-  void ms_handle_connect(Connection *c) {}
-  bool ms_handle_reset(Connection *c) {return false;}
-  void ms_handle_remote_reset(Connection *c) {}
-  bool ms_handle_refused(Connection *c) {return false;}
+  bool ms_dispatch(Message *m) override;
+  void ms_handle_connect(Connection *c) override {}
+  bool ms_handle_reset(Connection *c) override {return false;}
+  void ms_handle_remote_reset(Connection *c) override {}
+  bool ms_handle_refused(Connection *c) override {return false;}
 
   void notify_mdsmap(MDSMap const *mdsmap);
   void notify_health(MDSRank const *mds);
@@ -102,8 +102,7 @@ private:
   MDSHealth health;
 
   // Ticker
-  class C_MDS_BeaconSender;
-  C_MDS_BeaconSender *sender;
+  Context *sender = nullptr;
 
   version_t awaiting_seq;
   Cond waiting_cond;

@@ -32,6 +32,7 @@ void RGWOp_User_Info::execute()
 
   std::string uid_str;
   bool fetch_stats;
+  bool sync_stats;
 
   RESTArgs::get_string(s, "uid", uid_str, &uid_str);
 
@@ -47,8 +48,11 @@ void RGWOp_User_Info::execute()
 
   RESTArgs::get_bool(s, "stats", false, &fetch_stats);
 
+  RESTArgs::get_bool(s, "sync", false, &sync_stats);
+
   op_state.set_user_id(uid);
   op_state.set_fetch_stats(fetch_stats);
+  op_state.set_sync_stats(sync_stats);
 
   http_ret = RGWUserAdminOp_User::info(store, op_state, flusher);
 }
@@ -76,6 +80,7 @@ void RGWOp_User_Create::execute()
   std::string secret_key;
   std::string key_type_str;
   std::string caps;
+  std::string tenant_name;
 
   bool gen_key;
   bool suspended;
@@ -96,6 +101,7 @@ void RGWOp_User_Create::execute()
   RESTArgs::get_string(s, "secret-key", secret_key, &secret_key);
   RESTArgs::get_string(s, "key-type", key_type_str, &key_type_str);
   RESTArgs::get_string(s, "user-caps", caps, &caps);
+  RESTArgs::get_string(s, "tenant", tenant_name, &tenant_name);
   RESTArgs::get_bool(s, "generate-key", true, &gen_key);
   RESTArgs::get_bool(s, "suspended", false, &suspended);
   RESTArgs::get_int32(s, "max-buckets", default_max_buckets, &max_buckets);
@@ -108,24 +114,17 @@ void RGWOp_User_Create::execute()
     return;
   }
 
-  // FIXME: don't do double argument checking
-  if (!uid.empty())
-    op_state.set_user_id(uid);
+  if (!tenant_name.empty()) {
+    uid.tenant = tenant_name;
+  }
 
-  if (!display_name.empty())
-    op_state.set_display_name(display_name);
-
-  if (!email.empty())
-    op_state.set_user_email(email);
-
-  if (!caps.empty())
-    op_state.set_caps(caps);
-
-  if (!access_key.empty())
-    op_state.set_access_key(access_key);
-
-  if (!secret_key.empty())
-    op_state.set_secret_key(secret_key);
+  // TODO: validate required args are passed in. (for eg. uid and display_name here)
+  op_state.set_user_id(uid);
+  op_state.set_display_name(display_name);
+  op_state.set_user_email(email);
+  op_state.set_caps(caps);
+  op_state.set_access_key(access_key);
+  op_state.set_secret_key(secret_key);
 
   if (!key_type_str.empty()) {
     int32_t key_type = KEY_TYPE_UNDEFINED;
@@ -239,23 +238,12 @@ void RGWOp_User_Modify::execute()
     return;
   }
 
-  if (!uid.empty())
-    op_state.set_user_id(uid);
-
-  if (!display_name.empty())
-    op_state.set_display_name(display_name);
-
-  if (!email.empty())
-    op_state.set_user_email(email);
-
-  if (!caps.empty())
-    op_state.set_caps(caps);
-
-  if (!access_key.empty())
-    op_state.set_access_key(access_key);
-
-  if (!secret_key.empty())
-    op_state.set_secret_key(secret_key);
+  op_state.set_user_id(uid);
+  op_state.set_display_name(display_name);
+  op_state.set_user_email(email);
+  op_state.set_caps(caps);
+  op_state.set_access_key(access_key);
+  op_state.set_secret_key(secret_key);
 
   if (max_buckets != RGW_DEFAULT_MAX_BUCKETS)
     op_state.set_max_buckets(max_buckets);
@@ -364,19 +352,10 @@ void RGWOp_Subuser_Create::execute()
   perm_mask = rgw_str_to_perm(perm_str.c_str());
   op_state.set_perm(perm_mask);
 
-  // FIXME: no double checking
-  if (!uid.empty())
-    op_state.set_user_id(uid);
-
-  if (!subuser.empty())
-    op_state.set_subuser(subuser);
-
-  if (!access_key.empty())
-    op_state.set_access_key(access_key);
-  
-  if (!secret_key.empty())
-    op_state.set_secret_key(secret_key);
-
+  op_state.set_user_id(uid);
+  op_state.set_subuser(subuser);
+  op_state.set_access_key(access_key);
+  op_state.set_secret_key(secret_key);
   op_state.set_generate_subuser(gen_subuser);
 
   if (gen_access)
@@ -437,12 +416,8 @@ void RGWOp_Subuser_Modify::execute()
   perm_mask = rgw_str_to_perm(perm_str.c_str());
   op_state.set_perm(perm_mask);
 
-  // FIXME: no double checking
-  if (!uid.empty())
-    op_state.set_user_id(uid);
-
-  if (!subuser.empty())
-    op_state.set_subuser(subuser);
+  op_state.set_user_id(uid);
+  op_state.set_subuser(subuser);
 
   if (!secret_key.empty())
     op_state.set_secret_key(secret_key);
@@ -489,12 +464,8 @@ void RGWOp_Subuser_Remove::execute()
   RESTArgs::get_string(s, "subuser", subuser, &subuser);
   RESTArgs::get_bool(s, "purge-keys", true, &purge_keys);
 
-  // FIXME: no double checking
-  if (!uid.empty())
-    op_state.set_user_id(uid);
-
-  if (!subuser.empty())
-    op_state.set_subuser(subuser);
+  op_state.set_user_id(uid);
+  op_state.set_subuser(subuser);
 
   if (purge_keys)
     op_state.set_purge_keys();
@@ -537,18 +508,10 @@ void RGWOp_Key_Create::execute()
   RESTArgs::get_string(s, "key-type", key_type_str, &key_type_str);
   RESTArgs::get_bool(s, "generate-key", true, &gen_key);
 
-  // FIXME: no double checking
-  if (!uid.empty())
-    op_state.set_user_id(uid);
-
-  if (!subuser.empty())
-    op_state.set_subuser(subuser);
-
-  if (!access_key.empty())
-    op_state.set_access_key(access_key);
-
-  if (!secret_key.empty())
-    op_state.set_secret_key(secret_key);
+  op_state.set_user_id(uid);
+  op_state.set_subuser(subuser);
+  op_state.set_access_key(access_key);
+  op_state.set_secret_key(secret_key);
 
   if (gen_key)
     op_state.set_generate_key();
@@ -596,15 +559,9 @@ void RGWOp_Key_Remove::execute()
   RESTArgs::get_string(s, "access-key", access_key, &access_key);
   RESTArgs::get_string(s, "key-type", key_type_str, &key_type_str);
 
-  // FIXME: no double checking
-  if (!uid.empty())
-    op_state.set_user_id(uid);
-
-  if (!subuser.empty())
-    op_state.set_subuser(subuser);
-
-  if (!access_key.empty())
-    op_state.set_access_key(access_key);
+  op_state.set_user_id(uid);
+  op_state.set_subuser(subuser);
+  op_state.set_access_key(access_key);
 
   if (!key_type_str.empty()) {
     int32_t key_type = KEY_TYPE_UNDEFINED;
@@ -645,12 +602,8 @@ void RGWOp_Caps_Add::execute()
 
   RESTArgs::get_string(s, "user-caps", caps, &caps);
 
-  // FIXME: no double checking
-  if (!uid.empty())
-    op_state.set_user_id(uid);
-
-  if (!caps.empty())
-    op_state.set_caps(caps);
+  op_state.set_user_id(uid);
+  op_state.set_caps(caps);
 
   http_ret = RGWUserAdminOp_Caps::add(store, op_state, flusher);
 }
@@ -681,12 +634,8 @@ void RGWOp_Caps_Remove::execute()
 
   RESTArgs::get_string(s, "user-caps", caps, &caps);
 
-  // FIXME: no double checking
-  if (!uid.empty())
-    op_state.set_user_id(uid);
-
-  if (!caps.empty())
-    op_state.set_caps(caps);
+  op_state.set_user_id(uid);
+  op_state.set_caps(caps);
 
   http_ret = RGWUserAdminOp_Caps::remove(store, op_state, flusher);
 }
@@ -757,6 +706,11 @@ void RGWOp_Quota_Info::execute()
   http_ret = user.init(store, op_state);
   if (http_ret < 0)
     return;
+
+  if (!op_state.has_existing_user()) {
+    http_ret = -ERR_NO_SUCH_USER;
+    return;
+  }
 
   RGWUserInfo info;
   string err_msg;
@@ -887,6 +841,11 @@ void RGWOp_Quota_Set::execute()
   http_ret = user.init(store, op_state);
   if (http_ret < 0) {
     ldout(store->ctx(), 20) << "failed initializing user info: " << http_ret << dendl;
+    return;
+  }
+
+  if (!op_state.has_existing_user()) {
+    http_ret = -ERR_NO_SUCH_USER;
     return;
   }
 

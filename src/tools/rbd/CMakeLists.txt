@@ -13,13 +13,11 @@ set(rbd_srcs
   action/Diff.cc
   action/DiskUsage.cc
   action/Export.cc
-  action/ExportDiff.cc
   action/Feature.cc
   action/Flatten.cc
   action/Group.cc
   action/ImageMeta.cc
   action/Import.cc
-  action/ImportDiff.cc
   action/Info.cc
   action/Journal.cc
   action/Kernel.cc
@@ -30,14 +28,19 @@ set(rbd_srcs
   action/MirrorImage.cc
   action/Nbd.cc
   action/ObjectMap.cc
+  action/Pool.cc
   action/Remove.cc
   action/Rename.cc
   action/Resize.cc
   action/Snap.cc
   action/Status.cc
+  action/Trash.cc
   action/Watch.cc)
+if(FREEBSD)
+  list(APPEND rbd_srcs action/Ggate.cc)
+endif()
+
 add_executable(rbd ${rbd_srcs}
-  $<TARGET_OBJECTS:common_util_obj>
   $<TARGET_OBJECTS:common_texttable_obj>)
 set_target_properties(rbd PROPERTIES OUTPUT_NAME rbd)
 target_link_libraries(rbd librbd librados

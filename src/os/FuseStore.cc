@@ -1,6 +1,7 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
+#include "include/compat.h"
 #include "FuseStore.h"
 #include "os/ObjectStore.h"
 #include "include/stringify.h"
@@ -15,7 +16,7 @@
 #include <fcntl.h>           /* Definition of AT_* constants */
 #include <sys/stat.h>
 
-#if defined(DARWIN) || defined(__FreeBSD__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
 #include <sys/param.h>
 #include <sys/mount.h>
 #endif

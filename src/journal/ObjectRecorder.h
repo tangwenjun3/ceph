@@ -42,7 +42,7 @@ public:
                  ContextWQ *work_queue, SafeTimer &timer, Mutex &timer_lock,
                  Handler *handler, uint8_t order, uint32_t flush_interval,
                  uint64_t flush_bytes, double flush_age);
-  ~ObjectRecorder();
+  ~ObjectRecorder() override;
 
   inline uint64_t get_object_number() const {
     return m_object_number;
@@ -79,23 +79,15 @@ private:
   struct FlushHandler : public FutureImpl::FlushHandler {
     ObjectRecorder *object_recorder;
     FlushHandler(ObjectRecorder *o) : object_recorder(o) {}
-    virtual void get() {
+    void get() override {
       object_recorder->get();
     }
-    virtual void put() {
+    void put() override {
       object_recorder->put();
     }
-    virtual void flush(const FutureImplPtr &future) {
+    void flush(const FutureImplPtr &future) override {
       Mutex::Locker locker(*(object_recorder->m_lock));
       object_recorder->flush(future);
-    }
-  };
-  struct C_AppendTask : public Context {
-    ObjectRecorder *object_recorder;
-    C_AppendTask(ObjectRecorder *o) : object_recorder(o) {
-    }
-    virtual void finish(int r) {
-      object_recorder->handle_append_task();
     }
   };
   struct C_AppendFlush : public Context {
@@ -105,7 +97,7 @@ private:
         : object_recorder(o), tid(_tid) {
       object_recorder->get();
     }
-    virtual void finish(int r) {
+    void finish(int r) override {
       object_recorder->handle_append_flushed(tid, r);
       object_recorder->put();
     }
@@ -132,7 +124,7 @@ private:
 
   FlushHandler m_flush_handler;
 
-  C_AppendTask *m_append_task;
+  Context *m_append_task = nullptr;
 
   mutable std::shared_ptr<Mutex> m_lock;
   AppendBuffers m_append_buffers;

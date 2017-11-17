@@ -9,6 +9,7 @@
 #include "include/stringify.h"
 #include "include/rbd/features.h"
 #include "common/dout.h"
+#include "librbd/ImageCtx.h"
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -41,8 +42,8 @@ std::string unique_lock_name(const std::string &name, void *address) {
   return name + " (" + stringify(address) + ")";
 }
 
-librados::AioCompletion *create_rados_ack_callback(Context *on_finish) {
-  return create_rados_ack_callback<Context, &Context::complete>(on_finish);
+librados::AioCompletion *create_rados_callback(Context *on_finish) {
+  return create_rados_callback<Context, &Context::complete>(on_finish);
 }
 
 std::string generate_image_id(librados::IoCtx &ioctx) {
@@ -69,6 +70,48 @@ uint64_t get_rbd_default_features(CephContext* cct)
   return boost::lexical_cast<uint64_t>(str_val);
 }
 
-} // namespace util
+bool calc_sparse_extent(const bufferptr &bp,
+                        size_t sparse_size,
+                        uint64_t length,
+                        size_t *write_offset,
+                        size_t *write_length,
+                        size_t *offset) {
+  size_t extent_size;
+  if (*offset + sparse_size > length) {
+    extent_size = length - *offset;
+  } else {
+    extent_size = sparse_size;
+  }
 
+  bufferptr extent(bp, *offset, extent_size);
+  *offset += extent_size;
+
+  bool extent_is_zero = extent.is_zero();
+  if (!extent_is_zero) {
+    *write_length += extent_size;
+  }
+  if (extent_is_zero && *write_length == 0) {
+    *write_offset += extent_size;
+  }
+
+  if ((extent_is_zero || *offset == length) && *write_length != 0) {
+    return true;
+  }
+  return false;
+}
+
+bool is_metadata_config_override(const std::string& metadata_key,
+                                 std::string* config_key) {
+  size_t prefix_len = librbd::ImageCtx::METADATA_CONF_PREFIX.size();
+  if (metadata_key.size() > prefix_len &&
+      metadata_key.compare(0, prefix_len,
+                           librbd::ImageCtx::METADATA_CONF_PREFIX) == 0) {
+    *config_key = metadata_key.substr(prefix_len,
+                                      metadata_key.size() - prefix_len);
+    return true;
+  }
+  return false;
+}
+
+} // namespace util
 } // namespace librbd

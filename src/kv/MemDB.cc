@@ -167,6 +167,20 @@ int MemDB::do_open(ostream &out, bool create)
   return _init(create);
 }
 
+int MemDB::open(ostream &out, const vector<ColumnFamily>& cfs) {
+  if (!cfs.empty()) {
+    assert(0 == "Not implemented");
+  }
+  return do_open(out, false);
+}
+
+int MemDB::create_and_open(ostream &out, const vector<ColumnFamily>& cfs) {
+  if (!cfs.empty()) {
+    assert(0 == "Not implemented");
+  }
+  return do_open(out, true);
+}
+
 MemDB::~MemDB()
 {
   close();
@@ -239,6 +253,19 @@ void MemDB::MDBTransactionImpl::rmkeys_by_prefix(const string &prefix)
   KeyValueDB::Iterator it = m_db->get_iterator(prefix);
   for (it->seek_to_first(); it->valid(); it->next()) {
     rmkey(prefix, it->key());
+  }
+}
+
+void MemDB::MDBTransactionImpl::rm_range_keys(const string &prefix, const string &start, const string &end)
+{
+  KeyValueDB::Iterator it = m_db->get_iterator(prefix);
+  it->lower_bound(start);
+  while (it->valid()) {
+    if (it->key() >= end) {
+      break;
+    }
+    rmkey(prefix, it->key());
+    it->next();
   }
 }
 

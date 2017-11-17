@@ -34,63 +34,72 @@ struct ECSubReadReply;
 struct RecoveryMessages;
 class ECBackend : public PGBackend {
 public:
-  RecoveryHandle *open_recovery_op();
+  RecoveryHandle *open_recovery_op() override;
 
   void run_recovery_op(
     RecoveryHandle *h,
     int priority
-    );
+    ) override;
 
-  void recover_object(
+  int recover_object(
     const hobject_t &hoid,
     eversion_t v,
     ObjectContextRef head,
     ObjectContextRef obc,
     RecoveryHandle *h
-    );
+    ) override;
 
-  bool handle_message(
+  bool _handle_message(
     OpRequestRef op
-    );
+    ) override;
   bool can_handle_while_inactive(
     OpRequestRef op
-    );
+    ) override;
   friend struct SubWriteApplied;
   friend struct SubWriteCommitted;
   void sub_write_applied(
-    ceph_tid_t tid, eversion_t version);
+    ceph_tid_t tid,
+    eversion_t version,
+    const ZTracer::Trace &trace);
   void sub_write_committed(
-    ceph_tid_t tid, eversion_t version, eversion_t last_complete);
+    ceph_tid_t tid,
+    eversion_t version,
+    eversion_t last_complete,
+    const ZTracer::Trace &trace);
   void handle_sub_write(
     pg_shard_t from,
     OpRequestRef msg,
     ECSubWrite &op,
+    const ZTracer::Trace &trace,
     Context *on_local_applied_sync = 0
     );
   void handle_sub_read(
     pg_shard_t from,
-    ECSubRead &op,
-    ECSubReadReply *reply
+    const ECSubRead &op,
+    ECSubReadReply *reply,
+    const ZTracer::Trace &trace
     );
   void handle_sub_write_reply(
     pg_shard_t from,
-    ECSubWriteReply &op
+    const ECSubWriteReply &op,
+    const ZTracer::Trace &trace
     );
   void handle_sub_read_reply(
     pg_shard_t from,
     ECSubReadReply &op,
-    RecoveryMessages *m
+    RecoveryMessages *m,
+    const ZTracer::Trace &trace
     );
 
   /// @see ReadOp below
-  void check_recovery_sources(const OSDMapRef& osdmap);
+  void check_recovery_sources(const OSDMapRef& osdmap) override;
 
-  void on_change();
-  void clear_recovery_state();
+  void on_change() override;
+  void clear_recovery_state() override;
 
-  void on_flushed();
+  void on_flushed() override;
 
-  void dump_recovery_info(Formatter *f) const;
+  void dump_recovery_info(Formatter *f) const override;
 
   void call_write_ordered(std::function<void(void)> &&cb) override;
 
@@ -109,14 +118,14 @@ public:
     ceph_tid_t tid,
     osd_reqid_t reqid,
     OpRequestRef op
-    );
+    ) override;
 
   int objects_read_sync(
     const hobject_t &hoid,
     uint64_t off,
     uint64_t len,
     uint32_t op_flags,
-    bufferlist *bl);
+    bufferlist *bl) override;
 
   /**
    * Async read mechanism
@@ -131,7 +140,7 @@ public:
    * maintain a queue of in progress reads (@see in_progress_client_reads)
    * to ensure that we always call the completion callback in order.
    *
-   * Another subtely is that while we may read a degraded object, we will
+   * Another subtly is that while we may read a degraded object, we will
    * still only perform a client read from shards in the acting set.  This
    * ensures that we won't ever have to restart a client initiated read in
    * check_recovery_sources.
@@ -173,7 +182,7 @@ public:
     const list<pair<boost::tuple<uint64_t, uint64_t, uint32_t>,
 		    pair<bufferlist*, Context*> > > &to_read,
     Context *on_complete,
-    bool fast_read = false);
+    bool fast_read = false) override;
 
   template <typename Func>
   void objects_read_async_no_cache(
@@ -305,12 +314,17 @@ private:
     boost::optional<map<string, bufferlist> > attrs,
     RecoveryMessages *m);
   void handle_recovery_push(
-    PushOp &op,
+    const PushOp &op,
     RecoveryMessages *m);
   void handle_recovery_push_reply(
-    PushReplyOp &op,
+    const PushReplyOp &op,
     pg_shard_t from,
     RecoveryMessages *m);
+  void get_all_avail_shards(
+    const hobject_t &hoid,
+    set<int> &have,
+    map<shard_id_t, pg_shard_t> &shards,
+    bool for_recovery);
 
 public:
   /**
@@ -345,12 +359,12 @@ public:
   };
   struct read_request_t {
     const list<boost::tuple<uint64_t, uint64_t, uint32_t> > to_read;
-    const set<pg_shard_t> need;
+    const map<pg_shard_t, vector<pair<int, int>>> need;
     const bool want_attrs;
     GenContext<pair<RecoveryMessages *, read_result_t& > &> *cb;
     read_request_t(
       const list<boost::tuple<uint64_t, uint64_t, uint32_t> > &to_read,
-      const set<pg_shard_t> &need,
+      const map<pg_shard_t, vector<pair<int, int>>> &need,
       bool want_attrs,
       GenContext<pair<RecoveryMessages *, read_result_t& > &> *cb)
       : to_read(to_read), need(need), want_attrs(want_attrs),
@@ -369,6 +383,8 @@ public:
     // True if reading for recovery which could possibly reading only a subset
     // of the available shards.
     bool for_recovery;
+
+    ZTracer::Trace trace;
 
     map<hobject_t, read_request_t> to_read;
     map<hobject_t, read_result_t> complete;
@@ -447,6 +463,7 @@ public:
     vector<pg_log_entry_t> log_entries;
     ceph_tid_t tid;
     osd_reqid_t reqid;
+    ZTracer::Trace trace;
 
     eversion_t roll_forward_to; /// Soon to be generated internally
 
@@ -574,18 +591,18 @@ public:
 	want.insert(i);
       }
     }
-    bool operator()(const set<pg_shard_t> &_have) const {
+    bool operator()(const set<pg_shard_t> &_have) const override {
       set<int> have;
       for (set<pg_shard_t>::const_iterator i = _have.begin();
 	   i != _have.end();
 	   ++i) {
 	have.insert(i->shard);
       }
-      set<int> min;
+      map<int, vector<pair<int, int>>> min;
       return ec_impl->minimum_to_decode(want, have, &min) == 0;
     }
   };
-  IsPGRecoverablePredicate *get_is_recoverable_predicate() {
+  IsPGRecoverablePredicate *get_is_recoverable_predicate() override {
     return new ECRecPred(ec_impl);
   }
 
@@ -601,11 +618,11 @@ public:
     ECReadPred(
       pg_shard_t whoami,
       ErasureCodeInterfaceRef ec_impl) : whoami(whoami), rec_pred(ec_impl) {}
-    bool operator()(const set<pg_shard_t> &_have) const {
+    bool operator()(const set<pg_shard_t> &_have) const override {
       return _have.count(whoami) && rec_pred(_have);
     }
   };
-  IsPGReadablePredicate *get_is_readable_predicate() {
+  IsPGReadablePredicate *get_is_readable_predicate() override {
     return new ECReadPred(get_parent()->whoami_shard(), ec_impl);
   }
 
@@ -632,32 +649,33 @@ public:
     const set<int> &want,      ///< [in] desired shards
     bool for_recovery,         ///< [in] true if we may use non-acting replicas
     bool do_redundant_reads,   ///< [in] true if we want to issue redundant reads to reduce latency
-    set<pg_shard_t> *to_read   ///< [out] shards to read
+    map<pg_shard_t, vector<pair<int, int>>> *to_read   ///< [out] shards, corresponding subchunks to read
     ); ///< @return error code, 0 on success
 
   int get_remaining_shards(
     const hobject_t &hoid,
     const set<int> &avail,
-    set<pg_shard_t> *to_read);
+    map<pg_shard_t, vector<pair<int, int>>> *to_read,
+    bool for_recovery);
 
   int objects_get_attrs(
     const hobject_t &hoid,
-    map<string, bufferlist> *out);
+    map<string, bufferlist> *out) override;
 
   void rollback_append(
     const hobject_t &hoid,
     uint64_t old_size,
-    ObjectStore::Transaction *t);
+    ObjectStore::Transaction *t) override;
 
-  bool scrub_supported() { return true; }
-  bool auto_repair_supported() const { return true; }
+  bool auto_repair_supported() const override { return true; }
 
   void be_deep_scrub(
     const hobject_t &obj,
     uint32_t seed,
     ScrubMap::object &o,
-    ThreadPool::TPHandle &handle);
-  uint64_t be_get_ondisk_size(uint64_t logical_size) {
+    ThreadPool::TPHandle &handle,
+    ScrubMap* const map = nullptr) override;
+  uint64_t be_get_ondisk_size(uint64_t logical_size) override {
     return sinfo.logical_to_next_chunk_offset(logical_size);
   }
   void _failed_push(const hobject_t &hoid,

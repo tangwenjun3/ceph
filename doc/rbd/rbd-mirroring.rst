@@ -102,6 +102,18 @@ For example::
         rbd --cluster local mirror pool peer remove image-pool 55672766-c02b-4729-8567-f13a66893445
         rbd --cluster remote mirror pool peer remove image-pool 60c0e299-b38f-4234-91f6-eed0a367be08
 
+Data Pools
+----------
+
+When creating images in the destination cluster, ``rbd-mirror`` selects a data
+pool as follows:
+
+#. If the destination cluster has a default data pool configured (with the
+   ``rbd_default_data_pool`` configuration option), it will be used.
+#. Otherwise, if the source image uses a separate data pool, and a pool with the
+   same name exists on the destination cluster, that pool will be used.
+#. If neither of the above is true, no data pool will be set.
+
 Image Configuration
 ===================
 
@@ -182,7 +194,7 @@ image on the alternate cluster.
    failover of an image. An external mechanism is required to coordinate the
    full failover process (e.g. closing the image before demotion).
 
-To demote an image to non-primary with ``rbd``, specify the
+To demote a specific image to non-primary with ``rbd``, specify the
 ``mirror image demote`` command along with the pool and image name::
 
         rbd mirror image demote {pool-name}/{image-name}
@@ -191,14 +203,32 @@ For example::
 
         rbd --cluster local mirror image demote image-pool/image-1
 
-To promote an image to primary with ``rbd``, specify the ``mirror image promote``
-command along with the pool and image name::
+To demote all primary images within a pool to non-primary with ``rbd``, specify
+the ``mirror pool demote`` command along with the pool name::
 
-        rbd mirror image promote {pool-name}/{image-name}
+        rbd mirror pool demote {pool-name}
+
+For example::
+
+        rbd --cluster local mirror pool demote image-pool
+
+To promote a specific image to primary with ``rbd``, specify the
+``mirror image promote`` command along with the pool and image name::
+
+        rbd mirror image promote [--force] {pool-name}/{image-name}
 
 For example::
 
         rbd --cluster remote mirror image promote image-pool/image-1
+
+To promote all non-primary images within a pool to primary with ``rbd``, specify
+the ``mirror pool promote`` command along with the pool name::
+
+        rbd mirror pool promote [--force] {pool-name}
+
+For example::
+
+        rbd --cluster local mirror pool promote image-pool
 
 .. tip:: Since the primary / non-primary status is per-image, it is possible to
    have two clusters split the IO load and stage failover / failback.
@@ -270,13 +300,24 @@ distribution package.
 
 .. important:: Each ``rbd-mirror`` daemon requires the ability to connect
    to both clusters simultaneously.
-.. warning:: Only run a single ``rbd-mirror`` daemon per Ceph cluster. A
-   future Ceph release will add support for horizontal scale-out of the
-   ``rbd-mirror`` daemon.
+.. warning:: Pre-Luminous releases: only run a single ``rbd-mirror`` daemon per
+   Ceph cluster.
+
+Each ``rbd-mirror`` daemon should use a unique Ceph user ID. To
+`create a Ceph user`_, with ``ceph`` specify the ``auth get-or-create``
+command, user name, monitor caps, and OSD caps::
+
+  ceph auth get-or-create client.rbd-mirror.{unique id} mon 'profile rbd' osd 'profile rbd'
+
+The ``rbd-mirror`` daemon can be managed by ``systemd`` by specifying the user
+ID as the daemon instance::
+
+  systemctl enable ceph-rbd-mirror@rbd-mirror.{unique id}
 
 .. _rbd: ../../man/8/rbd
 .. _ceph-conf: ../../rados/configuration/ceph-conf/#running-multiple-clusters
 .. _explicitly enabled: #enable-image-mirroring
 .. _force resync command: #force-image-resync
 .. _demote the image: #image-promotion-and-demotion
+.. _create a Ceph user: ../../rados/operations/user-management#add-a-user
 

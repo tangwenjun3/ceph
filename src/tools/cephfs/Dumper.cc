@@ -63,7 +63,7 @@ int Dumper::recover_journal(Journaler *journaler)
   lock.Lock();
   journaler->recover(&cond);
   lock.Unlock();
-  int const r = cond.wait();
+  const int r = cond.wait();
 
   if (r < 0) { // Error
     derr << "error on recovery: " << cpp_strerror(r) << dendl;
@@ -82,9 +82,9 @@ int Dumper::dump(const char *dump_file)
   auto fs =  fsmap->get_filesystem(role.fscid);
   assert(fs != nullptr);
 
-  Journaler journaler(ino, fs->mds_map.get_metadata_pool(),
+  Journaler journaler("dumper", ino, fs->mds_map.get_metadata_pool(),
                       CEPH_FS_ONDISK_MAGIC, objecter, 0, 0,
-                      &timer, &finisher);
+                      &finisher);
   r = recover_journal(&journaler);
   if (r) {
     return r;

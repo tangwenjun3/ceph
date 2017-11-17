@@ -2,10 +2,10 @@
 // vim: ts=8 sw=2 smarttab
 
 #include "librbd/operation/FlattenRequest.h"
-#include "librbd/AioObjectRequest.h"
 #include "librbd/AsyncObjectThrottle.h"
 #include "librbd/ExclusiveLock.h"
 #include "librbd/ImageCtx.h"
+#include "librbd/io/ObjectRequest.h"
 #include "common/dout.h"
 #include "common/errno.h"
 #include <boost/lambda/bind.hpp>
@@ -41,8 +41,8 @@ public:
 
     bufferlist bl;
     string oid = image_ctx.get_object_name(m_object_no);
-    AioObjectWrite *req = new AioObjectWrite(&image_ctx, oid, m_object_no, 0,
-                                             bl, m_snapc, this, 0);
+    auto req = new io::ObjectWriteRequest<I>(&image_ctx, oid, m_object_no, 0,
+                                             bl, m_snapc, 0, {}, this);
     if (!req->has_parent()) {
       // stop early if the parent went away - it just means
       // another flatten finished first or the image was resized
@@ -89,7 +89,7 @@ bool FlattenRequest<I>::should_complete(int r) {
 
   default:
     lderr(cct) << "invalid state: " << m_state << dendl;
-    assert(false);
+    ceph_abort();
     break;
   }
   return false;

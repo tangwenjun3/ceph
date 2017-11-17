@@ -5,6 +5,9 @@ set(librbd_test
   test_ImageWatcher.cc
   test_internal.cc
   test_mirroring.cc
+  test_BlockGuard.cc
+  test_DeepCopy.cc
+  test_Groups.cc
   test_MirroringWatcher.cc
   test_ObjectMap.cc
   test_Operations.cc
@@ -23,19 +26,27 @@ set_target_properties(rbd_test_mock PROPERTIES COMPILE_FLAGS
 # unittest_librbd
 # doesn't use add_ceph_test because it is called by run-rbd-unit-tests.sh
 set(unittest_librbd_srcs
-  test_BlockGuard.cc
-  test_ConsistencyGroups.cc
   test_main.cc
   test_mock_fixture.cc
-  test_mock_AioImageRequest.cc
+  test_mock_DeepCopyRequest.cc
   test_mock_ExclusiveLock.cc
   test_mock_Journal.cc
   test_mock_ManagedLock.cc
   test_mock_ObjectMap.cc
+  deep_copy/test_mock_ImageCopyRequest.cc
+  deep_copy/test_mock_MetadataCopyRequest.cc
+  deep_copy/test_mock_ObjectCopyRequest.cc
+  deep_copy/test_mock_SetHeadRequest.cc
+  deep_copy/test_mock_SnapshotCopyRequest.cc
+  deep_copy/test_mock_SnapshotCreateRequest.cc
   exclusive_lock/test_mock_PreAcquireRequest.cc
   exclusive_lock/test_mock_PostAcquireRequest.cc
   exclusive_lock/test_mock_PreReleaseRequest.cc
   image/test_mock_RefreshRequest.cc
+  image/test_mock_RemoveRequest.cc
+  io/test_mock_ImageRequest.cc
+  io/test_mock_ImageRequestWQ.cc
+  io/test_mock_ObjectRequest.cc
   journal/test_mock_OpenRequest.cc
   journal/test_mock_PromoteRequest.cc
   journal/test_mock_Replay.cc
@@ -63,6 +74,7 @@ set(unittest_librbd_srcs
   operation/test_mock_SnapshotRemoveRequest.cc
   operation/test_mock_SnapshotRollbackRequest.cc
   operation/test_mock_SnapshotUnprotectRequest.cc
+  operation/test_mock_TrimRequest.cc
   watcher/test_mock_RewatchRequest.cc
   )
 add_executable(unittest_librbd
@@ -103,9 +115,10 @@ target_link_libraries(ceph_test_librbd
   journal
   cls_journal_client
   cls_rbd_client
-  rados_a
+  librados
   ${UNITTEST_LIBS}
   radostest)
+target_compile_definitions(ceph_test_librbd PUBLIC "-DTEST_LIBRBD_INTERNALS")
 set_target_properties(ceph_test_librbd PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
 
@@ -113,12 +126,11 @@ add_executable(ceph_test_librbd_api
   test_support.cc
   test_librbd.cc
   test_main.cc
+  $<TARGET_OBJECTS:libradostest_obj>
   $<TARGET_OBJECTS:common_texttable_obj>)
 target_link_libraries(ceph_test_librbd_api
   librbd
   librados
-  ceph-common
-  radostest
   ${UNITTEST_LIBS})
 set_target_properties(ceph_test_librbd_api PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
@@ -131,16 +143,21 @@ target_link_libraries(ceph_test_librbd_fsx
   librbd
   librados
   journal
-  krbd
   global
   m
   ${CMAKE_DL_LIBS}
   ${CRYPTO_LIBS}
   ${EXTRALIBS}
   )
+if(WITH_KRBD)
+  target_link_libraries(ceph_test_librbd_fsx
+    krbd)
+endif()
+install(TARGETS
+  ceph_test_librbd_fsx
+  DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 install(TARGETS
   ceph_test_librbd
   ceph_test_librbd_api
-  ceph_test_librbd_fsx
   DESTINATION ${CMAKE_INSTALL_BINDIR})

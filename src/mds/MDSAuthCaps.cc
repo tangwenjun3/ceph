@@ -116,19 +116,21 @@ bool MDSCapMatch::match(const std::string &target_path,
   if (uid != MDS_AUTH_UID_ANY) {
     if (uid != caller_uid)
       return false;
-    bool gid_matched = false;
-    if (std::find(gids.begin(), gids.end(), caller_gid) != gids.end())
-      gid_matched = true;
-    if (caller_gid_list) {
-      for (auto i = caller_gid_list->begin(); i != caller_gid_list->end(); ++i) {
-	if (std::find(gids.begin(), gids.end(), *i) != gids.end()) {
-	  gid_matched = true;
-	  break;
+    if (!gids.empty()) {
+      bool gid_matched = false;
+      if (std::find(gids.begin(), gids.end(), caller_gid) != gids.end())
+	gid_matched = true;
+      if (caller_gid_list) {
+	for (auto i = caller_gid_list->begin(); i != caller_gid_list->end(); ++i) {
+	  if (std::find(gids.begin(), gids.end(), *i) != gids.end()) {
+	    gid_matched = true;
+	    break;
+	  }
 	}
       }
+      if (!gid_matched)
+	return false;
     }
-    if (!gid_matched)
-      return false;
   }
 
   if (!match_path(target_path)) {
@@ -215,8 +217,8 @@ bool MDSAuthCaps::is_capable(const std::string &inode_path,
       
 
       // Spec is non-allowing if caller asked for set pool but spec forbids it
-      if (mask & MAY_SET_POOL) {
-        if (!i->spec.allows_set_pool()) {
+      if (mask & MAY_SET_VXATTR) {
+        if (!i->spec.allows_set_vxattr()) {
           continue;
         }
       }

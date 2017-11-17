@@ -5,6 +5,7 @@
 #include "BlueFS.h"
 #include "include/stringify.h"
 #include "kv/RocksDBStore.h"
+#include "string.h"
 
 rocksdb::Status err_to_status(int r)
 {
@@ -16,7 +17,10 @@ rocksdb::Status err_to_status(int r)
   case -EINVAL:
     return rocksdb::Status::InvalidArgument(rocksdb::Status::kNone);
   case -EIO:
+  case -EEXIST:
     return rocksdb::Status::IOError(rocksdb::Status::kNone);
+  case -ENOLCK:
+    return rocksdb::Status::IOError(strerror(r));
   default:
     // FIXME :(
     assert(0 == "unrecognized error code");
@@ -30,7 +34,7 @@ class BlueRocksSequentialFile : public rocksdb::SequentialFile {
   BlueFS::FileReader *h;
  public:
   BlueRocksSequentialFile(BlueFS *fs, BlueFS::FileReader *h) : fs(fs), h(h) {}
-  ~BlueRocksSequentialFile() {
+  ~BlueRocksSequentialFile() override {
     delete h;
   }
 
@@ -76,7 +80,7 @@ class BlueRocksRandomAccessFile : public rocksdb::RandomAccessFile {
   BlueFS::FileReader *h;
  public:
   BlueRocksRandomAccessFile(BlueFS *fs, BlueFS::FileReader *h) : fs(fs), h(h) {}
-  ~BlueRocksRandomAccessFile() {
+  ~BlueRocksRandomAccessFile() override {
     delete h;
   }
 
@@ -96,16 +100,6 @@ class BlueRocksRandomAccessFile : public rocksdb::RandomAccessFile {
     *result = rocksdb::Slice(scratch, r);
     return rocksdb::Status::OK();
   }
-
-  // Used by the file_reader_writer to decide if the ReadAhead wrapper
-  // should simply forward the call and do not enact buffering or locking.
-  bool ShouldForwardRawRequest() const override {
-    return false;
-  }
-
-  // For cases when read-ahead is implemented in the platform dependent
-  // layer
-  void EnableReadAhead() override {}
 
   // Tries to get an unique ID for this file that will be the same each time
   // the file is opened (and will stay the same while the file is open).
@@ -154,7 +148,7 @@ class BlueRocksWritableFile : public rocksdb::WritableFile {
   BlueFS::FileWriter *h;
  public:
   BlueRocksWritableFile(BlueFS *fs, BlueFS::FileWriter *h) : fs(fs), h(h) {}
-  ~BlueRocksWritableFile() {
+  ~BlueRocksWritableFile() override {
     fs->close_writer(h);
   }
 
@@ -306,7 +300,7 @@ class BlueRocksFileLock : public rocksdb::FileLock {
   BlueFS *fs;
   BlueFS::FileLock *lock;
   BlueRocksFileLock(BlueFS *fs, BlueFS::FileLock *l) : fs(fs), lock(l) { }
-  ~BlueRocksFileLock() {
+  ~BlueRocksFileLock() override {
   }
 };
 
@@ -417,6 +411,7 @@ rocksdb::Status BlueRocksEnv::GetChildren(
   const std::string& dir,
   std::vector<std::string>* result)
 {
+  result->clear();
   int r = fs->readdir(dir, result);
   if (r < 0)
     return rocksdb::Status::IOError(dir, strerror(ENOENT));//    return err_to_status(r);
@@ -502,6 +497,29 @@ rocksdb::Status BlueRocksEnv::LinkFile(
   const std::string& target)
 {
   ceph_abort();
+}
+
+rocksdb::Status BlueRocksEnv::AreFilesSame(
+  const std::string& first,
+  const std::string& second, bool* res)
+{
+  for (auto& path : {first, second}) {
+    if (fs->dir_exists(path)) {
+      continue;
+    }
+    std::string dir, file;
+    split(path, &dir, &file);
+    int r = fs->stat(dir, file, nullptr, nullptr);
+    if (!r) {
+      continue;
+    } else if (r == -ENOENT) {
+      return rocksdb::Status::NotFound("AreFilesSame", path);
+    } else {
+      return err_to_status(r);
+    }
+  }
+  *res = (first == second);
+  return rocksdb::Status::OK();
 }
 
 rocksdb::Status BlueRocksEnv::LockFile(

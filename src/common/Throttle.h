@@ -4,18 +4,18 @@
 #ifndef CEPH_THROTTLE_H
 #define CEPH_THROTTLE_H
 
-#include "Mutex.h"
-#include "Cond.h"
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <iostream>
 #include <list>
 #include <map>
-#include <iostream>
-#include <condition_variable>
-#include <chrono>
-#include "include/atomic.h"
-#include "include/Context.h"
+#include <mutex>
 
-class CephContext;
-class PerfCounters;
+#include "include/Context.h"
+#include "common/Timer.h"
+#include "common/convenience.h"
+#include "common/perf_counters.h"
 
 /**
  * @class Throttle
@@ -28,10 +28,10 @@ class PerfCounters;
 class Throttle {
   CephContext *cct;
   const std::string name;
-  PerfCounters *logger;
-  ceph::atomic_t count, max;
-  Mutex lock;
-  list<Cond*> cond;
+  PerfCountersRef logger;
+  std::atomic<unsigned> count = { 0 }, max = { 0 };
+  std::mutex lock;
+  std::list<std::condition_variable> conds;
   const bool use_perf;
 
 public:
@@ -41,15 +41,15 @@ public:
 private:
   void _reset_max(int64_t m);
   bool _should_wait(int64_t c) const {
-    int64_t m = max.read();
-    int64_t cur = count.read();
+    int64_t m = max;
+    int64_t cur = count;
     return
       m &&
       ((c <= m && cur + c > m) || // normally stay under max
        (c >= m && cur > m));     // except for large c
   }
 
-  bool _wait(int64_t c);
+  bool _wait(int64_t c, UNIQUE_LOCK_T(lock)& l);
 
 public:
   /**
@@ -57,14 +57,21 @@ public:
    * @returns the number of taken slots
    */
   int64_t get_current() const {
-    return count.read();
+    return count;
   }
 
   /**
    * get the max number of slots
    * @returns the max number of slots
    */
-  int64_t get_max() const { return max.read(); }
+  int64_t get_max() const { return max; }
+
+  /**
+   * return true if past midpoint
+   */
+  bool past_midpoint() const {
+    return count >= max / 2;
+  }
 
   /**
    * set the new max number, and wait until the number of taken slots drains
@@ -114,7 +121,7 @@ public:
     return _should_wait(c);
   }
   void reset_max(int64_t m) {
-    Mutex::Locker l(lock);
+    auto l = ceph::uniquely_lock(lock);
     _reset_max(m);
   }
 };
@@ -148,7 +155,7 @@ public:
 class BackoffThrottle {
   CephContext *cct;
   const std::string name;
-  PerfCounters *logger;
+  PerfCountersRef logger;
 
   std::mutex lock;
   using locker = std::unique_lock<std::mutex>;
@@ -246,12 +253,13 @@ public:
   bool pending_error() const;
   int wait_for_ret();
 private:
-  mutable Mutex m_lock;
-  Cond m_cond;
+  mutable std::mutex m_lock;
+  std::condition_variable m_cond;
   uint64_t m_max;
-  uint64_t m_current;
-  int m_ret;
+  uint64_t m_current = 0;
+  int m_ret = 0;
   bool m_ignore_enoent;
+  uint32_t waiters = 0;
 };
 
 
@@ -264,7 +272,7 @@ public:
   }
 
 protected:
-  virtual void finish(int r);
+  void finish(int r) override;
 
 private:
   OrderedThrottle *m_ordered_throttle;
@@ -281,6 +289,7 @@ private:
 class OrderedThrottle {
 public:
   OrderedThrottle(uint64_t max, bool ignore_enoent);
+  ~OrderedThrottle();
 
   C_OrderedThrottle *start_op(Context *on_finish);
   void end_op(int r);
@@ -306,19 +315,92 @@ private:
 
   typedef std::map<uint64_t, Result> TidResult;
 
-  mutable Mutex m_lock;
-  Cond m_cond;
+  mutable std::mutex m_lock;
+  std::condition_variable m_cond;
   uint64_t m_max;
-  uint64_t m_current;
-  int m_ret_val;
+  uint64_t m_current = 0;
+  int m_ret_val = 0;
   bool m_ignore_enoent;
 
-  uint64_t m_next_tid;
-  uint64_t m_complete_tid;
+  uint64_t m_next_tid = 0;
+  uint64_t m_complete_tid = 0;
 
   TidResult m_tid_result;
 
-  void complete_pending_ops();
+  void complete_pending_ops(UNIQUE_LOCK_T(m_lock)& l);
+  uint32_t waiters = 0;
+};
+
+
+class TokenBucketThrottle {
+
+  struct Bucket {
+    CephContext *cct;
+    const std::string name;
+    std::atomic<uint64_t> remain = { 0 }, max = { 0 };
+
+    Bucket(CephContext *cct, const std::string& n, uint64_t m)
+      : cct(cct), name(n),
+	remain(m), max(m)
+    {
+    }
+
+    uint64_t get(uint64_t c);
+    uint64_t put(uint64_t c);
+    void set_max(uint64_t m);
+  };
+
+  struct Blocker {
+    uint64_t tokens_requested;
+    Context *ctx;
+
+    Blocker(uint64_t _tokens_requested, Context* _ctx)
+      : tokens_requested(_tokens_requested), ctx(_ctx) {}
+  };
+
+  CephContext *m_cct;
+  Bucket m_throttle;
+  uint64_t m_avg = 0;
+  SafeTimer *m_timer;
+  Mutex *m_timer_lock;
+  FunctionContext *m_token_ctx = nullptr;
+  list<Blocker> m_blockers;
+  Mutex m_lock;
+
+public:
+  TokenBucketThrottle(CephContext *cct, uint64_t capacity, uint64_t avg,
+  		    SafeTimer *timer, Mutex *timer_lock);
+  
+  ~TokenBucketThrottle();
+  
+  template <typename T, typename I, void(T::*MF)(int, I*)>
+  bool get(uint64_t c, T *handler, I *item) {
+    if (0 == m_throttle.max)
+      return false;
+  
+    bool waited = false;
+  
+    Mutex::Locker lock(m_lock);
+    uint64_t got = m_throttle.get(c);
+    if (got < c) {
+      // Not enough tokens, add a blocker for it.
+      Context *ctx = new FunctionContext([this, handler, item](int r) {
+  	(handler->*MF)(r, item);
+        });
+      m_blockers.emplace_back(c - got, ctx);
+      waited = true;
+    }
+    return waited;
+  }
+  
+  
+  void set_max(uint64_t m);
+  void set_average(uint64_t avg);
+
+private:
+  void add_tokens();
+  void schedule_timer();
+  void cancel_timer();
 };
 
 #endif

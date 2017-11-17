@@ -10,7 +10,7 @@
 #include "common/snap_types.h"
 #include "cls/lock/cls_lock_types.h"
 #include "librbd/ImageCtx.h"
-#include "librbd/parent_types.h"
+#include "librbd/Types.h"
 #include <string>
 #include <vector>
 
@@ -50,6 +50,9 @@ private:
    *    |                                                     |
    *    | (v2)                                                v
    *    \-----> V2_GET_MUTABLE_METADATA                    <apply>
+   *                |                                         |
+   *                v                                         |
+   *            V2_GET_METADATA                               |
    *                |                                         |
    *                v                                         |
    *            V2_GET_FLAGS                                  |
@@ -122,20 +125,24 @@ private:
 
   bufferlist m_out_bl;
 
-  uint8_t m_order;
-  uint64_t m_size;
-  uint64_t m_features;
-  uint64_t m_incompatible_features;
-  uint64_t m_flags;
+  uint8_t m_order = 0;
+  uint64_t m_size = 0;
+  uint64_t m_features = 0;
+  uint64_t m_incompatible_features = 0;
+  uint64_t m_flags = 0;
+
+  std::string m_last_metadata_key;
+  std::map<std::string, bufferlist> m_metadata;
+
   std::string m_object_prefix;
-  parent_info m_parent_md;
+  ParentInfo m_parent_md;
   cls::rbd::GroupSpec m_group_spec;
 
   ::SnapContext m_snapc;
   std::vector<std::string> m_snap_names;
   std::vector<cls::rbd::SnapshotNamespace> m_snap_namespaces;
   std::vector<uint64_t> m_snap_sizes;
-  std::vector<parent_info> m_snap_parents;
+  std::vector<ParentInfo> m_snap_parents;
   std::vector<uint8_t> m_snap_protection;
   std::vector<uint64_t> m_snap_flags;
   std::vector<utime_t> m_snap_timestamps;
@@ -143,7 +150,7 @@ private:
   std::map<rados::cls::lock::locker_id_t,
            rados::cls::lock::locker_info_t> m_lockers;
   std::string m_lock_tag;
-  bool m_exclusive_locked;
+  bool m_exclusive_locked = false;
 
   bool m_blocked_writes = false;
   bool m_incomplete_update = false;
@@ -162,6 +169,9 @@ private:
 
   void send_v2_get_mutable_metadata();
   Context *handle_v2_get_mutable_metadata(int *result);
+
+  void send_v2_get_metadata();
+  Context *handle_v2_get_metadata(int *result);
 
   void send_v2_get_flags();
   Context *handle_v2_get_flags(int *result);
@@ -220,7 +230,7 @@ private:
   }
 
   void apply();
-  int get_parent_info(uint64_t snap_id, parent_info *parent_md);
+  int get_parent_info(uint64_t snap_id, ParentInfo *parent_md);
 };
 
 } // namespace image

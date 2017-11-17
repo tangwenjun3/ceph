@@ -21,6 +21,7 @@
 #include "KernelDevice.h"
 #include "include/types.h"
 #include "include/compat.h"
+#include "include/stringify.h"
 #include "common/errno.h"
 #include "common/debug.h"
 #include "common/blkdev.h"
@@ -29,19 +30,15 @@
 #define dout_context cct
 #define dout_subsys ceph_subsys_bdev
 #undef dout_prefix
-#define dout_prefix *_dout << "bdev(" << path << ") "
+#define dout_prefix *_dout << "bdev(" << this << " " << path << ") "
 
 KernelDevice::KernelDevice(CephContext* cct, aio_callback_t cb, void *cbpriv)
-  : BlockDevice(cct),
+  : BlockDevice(cct, cb, cbpriv),
     fd_direct(-1),
     fd_buffered(-1),
-    size(0), block_size(0),
     fs(NULL), aio(false), dio(false),
     debug_lock("KernelDevice::debug_lock"),
-    flush_lock("KernelDevice::flush_lock"),
     aio_queue(cct->_conf->bdev_aio_max_queue_depth),
-    aio_callback(cb),
-    aio_callback_priv(cbpriv),
     aio_stop(false),
     aio_thread(this),
     injecting_crash(0)
@@ -107,20 +104,6 @@ int KernelDevice::open(const string& p)
     derr << __func__ << " fstat got " << cpp_strerror(r) << dendl;
     goto out_fail;
   }
-  if (S_ISBLK(st.st_mode)) {
-    int64_t s;
-    r = get_block_device_size(fd_direct, &s);
-    if (r < 0) {
-      goto out_fail;
-    }
-
-    rotational = block_device_is_rotational(path.c_str());
-    size = s;
-  } else {
-    size = st.st_size;
-    //regular file is rotational device
-    rotational = true;
-  }
 
   // Operate as though the block size is 4 KB.  The backing file
   // blksize doesn't strictly matter except that some file systems may
@@ -133,14 +116,41 @@ int KernelDevice::open(const string& p)
 	    << block_size << " anyway" << dendl;
   }
 
+  if (S_ISBLK(st.st_mode)) {
+    int64_t s;
+    r = get_block_device_size(fd_direct, &s);
+    if (r < 0) {
+      goto out_fail;
+    }
+    size = s;
+  } else {
+    size = st.st_size;
+  }
+
+  {
+    char partition[PATH_MAX], devname[PATH_MAX];
+    r = get_device_by_fd(fd_buffered, partition, devname, sizeof(devname));
+    if (r < 0) {
+      derr << "unable to get device name for " << path << ": "
+	   << cpp_strerror(r) << dendl;
+      rotational = true;
+    } else {
+      dout(20) << __func__ << " devname " << devname << dendl;
+      rotational = block_device_is_rotational(devname);
+      this->devname = devname;
+    }
+  }
+
+  r = _aio_start();
+  if (r < 0) {
+    goto out_fail;
+  }
+
   fs = FS::create_by_fd(fd_direct);
   assert(fs);
 
   // round size down to an even block
   size &= ~(block_size - 1);
-
-  r = _aio_start();
-  assert(r == 0);
 
   dout(1) << __func__
 	  << " size " << size
@@ -159,6 +169,18 @@ int KernelDevice::open(const string& p)
   VOID_TEMP_FAILURE_RETRY(::close(fd_direct));
   fd_direct = -1;
   return r;
+}
+
+int KernelDevice::get_devices(std::set<std::string> *ls)
+{
+  if (devname.empty()) {
+    return 0;
+  }
+  ls->insert(devname);
+  if (devname.find("dm-") == 0) {
+    get_dm_parents(devname, ls);
+  }
+  return 0;
 }
 
 void KernelDevice::close()
@@ -181,13 +203,91 @@ void KernelDevice::close()
   path.clear();
 }
 
+static string get_dev_property(const char *dev, const char *property)
+{
+  char val[1024] = {0};
+  get_block_device_string_property(dev, property, val, sizeof(val));
+  return val;
+}
+
+int KernelDevice::collect_metadata(const string& prefix, map<string,string> *pm) const
+{
+  (*pm)[prefix + "rotational"] = stringify((int)(bool)rotational);
+  (*pm)[prefix + "size"] = stringify(get_size());
+  (*pm)[prefix + "block_size"] = stringify(get_block_size());
+  (*pm)[prefix + "driver"] = "KernelDevice";
+  if (rotational) {
+    (*pm)[prefix + "type"] = "hdd";
+  } else {
+    (*pm)[prefix + "type"] = "ssd";
+  }
+
+  struct stat st;
+  int r = ::fstat(fd_buffered, &st);
+  if (r < 0)
+    return -errno;
+  if (S_ISBLK(st.st_mode)) {
+    (*pm)[prefix + "access_mode"] = "blk";
+    char partition_path[PATH_MAX];
+    char dev_node[PATH_MAX];
+    int rc = get_device_by_fd(fd_buffered, partition_path, dev_node, PATH_MAX);
+    switch (rc) {
+    case -EOPNOTSUPP:
+    case -EINVAL:
+      (*pm)[prefix + "partition_path"] = "unknown";
+      (*pm)[prefix + "dev_node"] = "unknown";
+      break;
+    case -ENODEV:
+      (*pm)[prefix + "partition_path"] = string(partition_path);
+      (*pm)[prefix + "dev_node"] = "unknown";
+      break;
+    default:
+      {
+	(*pm)[prefix + "partition_path"] = string(partition_path);
+	(*pm)[prefix + "dev_node"] = string(dev_node);
+	(*pm)[prefix + "model"] = get_dev_property(dev_node, "device/model");
+	(*pm)[prefix + "dev"] = get_dev_property(dev_node, "dev");
+
+	// nvme exposes a serial number
+	string serial = get_dev_property(dev_node, "device/serial");
+	if (serial.length()) {
+	  (*pm)[prefix + "serial"] = serial;
+	}
+
+	// nvme has a device/device/* structure; infer from that.  there
+	// is probably a better way?
+	string nvme_vendor = get_dev_property(dev_node, "device/device/vendor");
+	if (nvme_vendor.length()) {
+	  (*pm)[prefix + "type"] = "nvme";
+	}
+      }
+    }
+  } else {
+    (*pm)[prefix + "access_mode"] = "file";
+    (*pm)[prefix + "path"] = path;
+  }
+  return 0;
+}
+
 int KernelDevice::flush()
 {
-  bool ret = io_since_flush.compare_and_swap(1, 0);
-  if (!ret) {
-    dout(10) << __func__ << " no-op (no ios since last flush)" << dendl;
+  // protect flush with a mutex.  note that we are not really protecting
+  // data here.  instead, we're ensuring that if any flush() caller
+  // sees that io_since_flush is true, they block any racing callers
+  // until the flush is observed.  that allows racing threads to be
+  // calling flush while still ensuring that *any* of them that got an
+  // aio completion notification will not return before that aio is
+  // stable on disk: whichever thread sees the flag first will block
+  // followers until the aio is stable.
+  std::lock_guard<std::mutex> l(flush_mutex);
+
+  bool expect = true;
+  if (!io_since_flush.compare_exchange_strong(expect, false)) {
+    dout(10) << __func__ << " no-op (no ios since last flush), flag is "
+	     << (int)io_since_flush.load() << dendl;
     return 0;
   }
+
   dout(10) << __func__ << " start" << dendl;
   if (cct->_conf->bdev_inject_crash) {
     ++injecting_crash;
@@ -218,7 +318,12 @@ int KernelDevice::_aio_start()
     dout(10) << __func__ << dendl;
     int r = aio_queue.init();
     if (r < 0) {
-      derr << __func__ << " failed: " << cpp_strerror(r) << dendl;
+      if (r == -EAGAIN) {
+	derr << __func__ << " io_setup(2) failed with EAGAIN; "
+	     << "try increasing /proc/sys/fs/aio-max-nr" << dendl;
+      } else {
+	derr << __func__ << " io_setup(2) failed: " << cpp_strerror(r) << dendl;
+      }
       return r;
     }
     aio_thread.create("bstore_aio");
@@ -243,12 +348,13 @@ void KernelDevice::_aio_thread()
   int inject_crash_count = 0;
   while (!aio_stop) {
     dout(40) << __func__ << " polling" << dendl;
-    int max = 16;
-    FS::aio_t *aio[max];
+    int max = cct->_conf->bdev_aio_reap_max;
+    aio_t *aio[max];
     int r = aio_queue.get_next_completed(cct->_conf->bdev_aio_poll_ms,
 					 aio, max);
     if (r < 0) {
       derr << __func__ << " got " << cpp_strerror(r) << dendl;
+      assert(0 == "got unexpected error from io_getevents");
     }
     if (r > 0) {
       dout(30) << __func__ << " got " << r << " completed aios" << dendl;
@@ -259,24 +365,43 @@ void KernelDevice::_aio_thread()
 	  std::lock_guard<std::mutex> l(debug_queue_lock);
 	  debug_aio_unlink(*aio[i]);
 	}
+
+	// set flag indicating new ios have completed.  we do this *before*
+	// any completion or notifications so that any user flush() that
+	// follows the observed io completion will include this io.  Note
+	// that an earlier, racing flush() could observe and clear this
+	// flag, but that also ensures that the IO will be stable before the
+	// later flush() occurs.
+	io_since_flush.store(true);
+
 	int r = aio[i]->get_return_value();
-	dout(10) << __func__ << " finished aio " << aio[i] << " r " << r
-		 << " ioc " << ioc
-		 << " with " << (ioc->num_running.load() - 1)
-		 << " aios left" << dendl;
-	assert(r >= 0);
-	int left = --ioc->num_running;
-	// NOTE: once num_running is decremented we can no longer
-	// trust aio[] values; they my be freed (e.g., by BlueFS::_fsync)
-	if (left == 0) {
-	  // check waiting count before doing callback (which may
-	  // destroy this ioc).  and avoid ref to ioc after aio_wake()
-	  // in case that triggers destruction.
-	  void *priv = ioc->priv;
-	  ioc->aio_wake();
-	  if (priv) {
-	    aio_callback(aio_callback_priv, priv);
+        if (r < 0) {
+          derr << __func__ << " got " << cpp_strerror(r) << dendl;
+          if (ioc->allow_eio && r == -EIO) {
+            ioc->set_return_value(r);
+          } else {
+            assert(0 == "got unexpected error from io_getevents");
+          }
+        } else if (aio[i]->length != (uint64_t)r) {
+          derr << "aio to " << aio[i]->offset << "~" << aio[i]->length
+               << " but returned: " << r << dendl;
+          assert(0 == "unexpected aio error");
+        }
+
+        dout(10) << __func__ << " finished aio " << aio[i] << " r " << r
+                 << " ioc " << ioc
+                 << " with " << (ioc->num_running.load() - 1)
+                 << " aios left" << dendl;
+
+	// NOTE: once num_running and we either call the callback or
+	// call aio_wake we cannot touch ioc or aio[] as the caller
+	// may free it.
+	if (ioc->priv) {
+	  if (--ioc->num_running == 0) {
+	    aio_callback(aio_callback_priv, ioc->priv);
 	  }
+	} else {
+          ioc->try_aio_wake();
 	}
       }
     }
@@ -335,7 +460,7 @@ void KernelDevice::_aio_log_start(
   }
 }
 
-void KernelDevice::debug_aio_link(FS::aio_t& aio)
+void KernelDevice::debug_aio_link(aio_t& aio)
 {
   if (debug_queue.empty()) {
     debug_oldest = &aio;
@@ -343,7 +468,7 @@ void KernelDevice::debug_aio_link(FS::aio_t& aio)
   debug_queue.push_back(aio);
 }
 
-void KernelDevice::debug_aio_unlink(FS::aio_t& aio)
+void KernelDevice::debug_aio_unlink(aio_t& aio)
 {
   if (aio.queue_item.is_linked()) {
     debug_queue.erase(debug_queue.iterator_to(aio));
@@ -377,54 +502,102 @@ void KernelDevice::aio_submit(IOContext *ioc)
 	   << " pending " << ioc->num_pending.load()
 	   << " running " << ioc->num_running.load()
 	   << dendl;
+
   if (ioc->num_pending.load() == 0) {
     return;
   }
+
   // move these aside, and get our end iterator position now, as the
   // aios might complete as soon as they are submitted and queue more
   // wal aio's.
-  list<FS::aio_t>::iterator e = ioc->running_aios.begin();
+  list<aio_t>::iterator e = ioc->running_aios.begin();
   ioc->running_aios.splice(e, ioc->pending_aios);
-  list<FS::aio_t>::iterator p = ioc->running_aios.begin();
 
   int pending = ioc->num_pending.load();
   ioc->num_running += pending;
   ioc->num_pending -= pending;
   assert(ioc->num_pending.load() == 0);  // we should be only thread doing this
-
-  bool done = false;
-  while (!done) {
-    FS::aio_t& aio = *p;
-    aio.priv = static_cast<void*>(ioc);
-    dout(20) << __func__ << "  aio " << &aio << " fd " << aio.fd
-	     << " 0x" << std::hex << aio.offset << "~" << aio.length
-	     << std::dec << dendl;
-    for (vector<iovec>::iterator q = aio.iov.begin(); q != aio.iov.end(); ++q)
-      dout(30) << __func__ << "   iov " << (void*)q->iov_base
-	       << " len " << q->iov_len << dendl;
-
-    // be careful: as soon as we submit aio we race with completion.
-    // since we are holding a ref take care not to dereference txc at
-    // all after that point.
-    list<FS::aio_t>::iterator cur = p;
-    ++p;
-    done = (p == e);
-
-    // do not dereference txc (or it's contents) after we submit (if
-    // done == true and we don't loop)
-    int retries = 0;
-    if (cct->_conf->bdev_debug_aio) {
+  assert(ioc->pending_aios.size() == 0);
+  
+  if (cct->_conf->bdev_debug_aio) {
+    list<aio_t>::iterator p = ioc->running_aios.begin();
+    while (p != e) {
+      dout(30) << __func__ << " " << *p << dendl;
       std::lock_guard<std::mutex> l(debug_queue_lock);
-      debug_aio_link(*cur);
-    }
-    int r = aio_queue.submit(*cur, &retries);
-    if (retries)
-      derr << __func__ << " retries " << retries << dendl;
-    if (r) {
-      derr << " aio submit got " << cpp_strerror(r) << dendl;
-      assert(r == 0);
+      debug_aio_link(*p++);
     }
   }
+
+  void *priv = static_cast<void*>(ioc);
+  int r, retries = 0;
+  r = aio_queue.submit_batch(ioc->running_aios.begin(), e, 
+			     pending, priv, &retries);
+  
+  if (retries)
+    derr << __func__ << " retries " << retries << dendl;
+  if (r < 0) {
+    derr << " aio submit got " << cpp_strerror(r) << dendl;
+    assert(r == 0);
+  }
+}
+
+int KernelDevice::_sync_write(uint64_t off, bufferlist &bl, bool buffered)
+{
+  uint64_t len = bl.length();
+  dout(5) << __func__ << " 0x" << std::hex << off << "~" << len
+	  << std::dec << " buffered" << dendl;
+  if (cct->_conf->bdev_inject_crash &&
+      rand() % cct->_conf->bdev_inject_crash == 0) {
+    derr << __func__ << " bdev_inject_crash: dropping io 0x" << std::hex
+	 << off << "~" << len << std::dec << dendl;
+    ++injecting_crash;
+    return 0;
+  }
+  vector<iovec> iov;
+  bl.prepare_iov(&iov);
+  int r = ::pwritev(buffered ? fd_buffered : fd_direct,
+		    &iov[0], iov.size(), off);
+
+  if (r < 0) {
+    r = -errno;
+    derr << __func__ << " pwritev error: " << cpp_strerror(r) << dendl;
+    return r;
+  }
+  if (buffered) {
+    // initiate IO (but do not wait)
+    r = ::sync_file_range(fd_buffered, off, len, SYNC_FILE_RANGE_WRITE);
+    if (r < 0) {
+      r = -errno;
+      derr << __func__ << " sync_file_range error: " << cpp_strerror(r) << dendl;
+      return r;
+    }
+  }
+
+  io_since_flush.store(true);
+
+  return 0;
+}
+
+int KernelDevice::write(
+  uint64_t off,
+  bufferlist &bl,
+  bool buffered)
+{
+  uint64_t len = bl.length();
+  dout(20) << __func__ << " 0x" << std::hex << off << "~" << len << std::dec
+	   << (buffered ? " (buffered)" : " (direct)")
+	   << dendl;
+  assert(is_valid_io(off, len));
+
+  if ((!buffered || bl.get_num_buffers() >= IOV_MAX) &&
+      bl.rebuild_aligned_size_and_memory(block_size, block_size, IOV_MAX)) {
+    dout(20) << __func__ << " rebuilding buffer to be aligned" << dendl;
+  }
+  dout(40) << "data: ";
+  bl.hexdump(*_dout);
+  *_dout << dendl;
+
+  return _sync_write(off, bl, buffered);
 }
 
 int KernelDevice::aio_write(
@@ -444,7 +617,7 @@ int KernelDevice::aio_write(
   assert(off + len <= size);
 
   if ((!buffered || bl.get_num_buffers() >= IOV_MAX) &&
-      bl.rebuild_aligned_size_and_memory(block_size, block_size)) {
+      bl.rebuild_aligned_size_and_memory(block_size, block_size, IOV_MAX)) {
     dout(20) << __func__ << " rebuilding buffer to be aligned" << dendl;
   }
   dout(40) << "data: ";
@@ -455,9 +628,9 @@ int KernelDevice::aio_write(
 
 #ifdef HAVE_LIBAIO
   if (aio && dio && !buffered) {
-    ioc->pending_aios.push_back(FS::aio_t(ioc, fd_direct));
+    ioc->pending_aios.push_back(aio_t(ioc, fd_direct));
     ++ioc->num_pending;
-    FS::aio_t& aio = ioc->pending_aios.back();
+    aio_t& aio = ioc->pending_aios.back();
     if (cct->_conf->bdev_inject_crash &&
 	rand() % cct->_conf->bdev_inject_crash == 0) {
       derr << __func__ << " bdev_inject_crash: dropping io 0x" << std::hex
@@ -469,10 +642,7 @@ int KernelDevice::aio_write(
       ++injecting_crash;
     } else {
       bl.prepare_iov(&aio.iov);
-      for (unsigned i=0; i<aio.iov.size(); ++i) {
-	dout(30) << "aio " << i << " " << aio.iov[i].iov_base
-		 << " " << aio.iov[i].iov_len << dendl;
-      }
+      dout(30) << aio << dendl;
       aio.bl.claim_append(bl);
       aio.pwritev(off, len);
     }
@@ -481,38 +651,11 @@ int KernelDevice::aio_write(
   } else
 #endif
   {
-    dout(5) << __func__ << " 0x" << std::hex << off << "~" << len
-	    << std::dec << " buffered" << dendl;
-    if (cct->_conf->bdev_inject_crash &&
-	rand() % cct->_conf->bdev_inject_crash == 0) {
-      derr << __func__ << " bdev_inject_crash: dropping io 0x" << std::hex
-	   << off << "~" << len << std::dec << dendl;
-      ++injecting_crash;
-      return 0;
-    }
-    vector<iovec> iov;
-    bl.prepare_iov(&iov);
-    int r = ::pwritev(buffered ? fd_buffered : fd_direct,
-		      &iov[0], iov.size(), off);
+    int r = _sync_write(off, bl, buffered);
     _aio_log_finish(ioc, off, len);
-
-    if (r < 0) {
-      r = -errno;
-      derr << __func__ << " pwritev error: " << cpp_strerror(r) << dendl;
+    if (r < 0)
       return r;
-    }
-    if (buffered) {
-      // initiate IO (but do not wait)
-      r = ::sync_file_range(fd_buffered, off, len, SYNC_FILE_RANGE_WRITE);
-      if (r < 0) {
-        r = -errno;
-        derr << __func__ << " sync_file_range error: " << cpp_strerror(r) << dendl;
-        return r;
-      }
-    }
   }
-
-  io_since_flush.set(1);
   return 0;
 }
 
@@ -523,14 +666,9 @@ int KernelDevice::read(uint64_t off, uint64_t len, bufferlist *pbl,
   dout(5) << __func__ << " 0x" << std::hex << off << "~" << len << std::dec
 	  << (buffered ? " (buffered)" : " (direct)")
 	  << dendl;
-  assert(off % block_size == 0);
-  assert(len % block_size == 0);
-  assert(len > 0);
-  assert(off < size);
-  assert(off + len <= size);
+  assert(is_valid_io(off, len));
 
   _aio_log_start(ioc, off, len);
-  ++ioc->num_reading;
 
   bufferptr p = buffer::create_page_aligned(len);
   int r = ::pread(buffered ? fd_buffered : fd_direct,
@@ -548,8 +686,6 @@ int KernelDevice::read(uint64_t off, uint64_t len, bufferlist *pbl,
 
  out:
   _aio_log_finish(ioc, off, len);
-  --ioc->num_reading;
-  ioc->aio_wake();
   return r < 0 ? r : 0;
 }
 
@@ -566,14 +702,11 @@ int KernelDevice::aio_read(
 #ifdef HAVE_LIBAIO
   if (aio && dio) {
     _aio_log_start(ioc, off, len);
-    ioc->pending_aios.push_back(FS::aio_t(ioc, fd_direct));
+    ioc->pending_aios.push_back(aio_t(ioc, fd_direct));
     ++ioc->num_pending;
-    FS::aio_t& aio = ioc->pending_aios.back();
+    aio_t& aio = ioc->pending_aios.back();
     aio.pread(off, len);
-    for (unsigned i=0; i<aio.iov.size(); ++i) {
-      dout(30) << "aio " << i << " " << aio.iov[i].iov_base
-	       << " " << aio.iov[i].iov_len << dendl;
-    }
+    dout(30) << aio << dendl;
     pbl->append(aio.bl);
     dout(5) << __func__ << " 0x" << std::hex << off << "~" << len
 	    << std::dec << " aio " << &aio << dendl;

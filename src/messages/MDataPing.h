@@ -36,7 +36,7 @@ class MDataPing : public Message {
   static const int COMPAT_VERSION = 1;
 
   std::string tag;
-  uint32_t counter;
+  uint32_t counter = 0;
   mdata_hook_func mdata_hook;
   struct xio_reg_mem mp;
   bool free_data;
@@ -58,7 +58,7 @@ class MDataPing : public Message {
     }
 
 private:
-  ~MDataPing()
+  ~MDataPing() override
     {
       if (mdata_hook)
 	mdata_hook(&mp);
@@ -73,19 +73,19 @@ private:
     }
 
 public:
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(tag, p);
     ::decode(counter, p);
   }
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(tag, payload);
     ::encode(counter, payload);
   }
 
-  const char *get_type_name() const { return "data_ping"; }
+  const char *get_type_name() const override { return "data_ping"; }
 
-  void print(ostream& out) const {
+  void print(ostream& out) const override {
     out << get_type_name() << " " << tag << " " << counter;
   }
 };

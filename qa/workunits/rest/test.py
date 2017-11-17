@@ -151,25 +151,6 @@ if __name__ == '__main__':
 
     # XXX no ceph -w equivalent yet
 
-    expect('mds/cluster_down', 'PUT', 200, '')
-    expect('mds/cluster_down', 'PUT', 200, '')
-    expect('mds/cluster_up', 'PUT', 200, '')
-    expect('mds/cluster_up', 'PUT', 200, '')
-
-    expect('mds/compat/rm_incompat?feature=4', 'PUT', 200, '')
-    expect('mds/compat/rm_incompat?feature=4', 'PUT', 200, '')
-
-    r = expect('mds/compat/show', 'GET', 200, 'json', JSONHDR)
-    assert('incompat' in r.myjson['output'])
-    r = expect('mds/compat/show', 'GET', 200, 'xml', XMLHDR)
-    assert(r.tree.find('output/mds_compat/incompat') is not None)
-
-    # EEXIST from CLI
-    expect('mds/deactivate?who=2', 'PUT', 400, '')
-
-    r = expect('mds/dump.xml', 'GET', 200, 'xml')
-    assert(r.tree.find('output/mdsmap/created') is not None)
-
     expect('fs/flag/set?flag_name=enable_multiple&val=true', 'PUT', 200, '')
     expect('osd/pool/create?pg_num=1&pool=my_cephfs_metadata', 'PUT', 200, '')
     expect('osd/pool/create?pg_num=1&pool=my_cephfs_data', 'PUT', 200, '')
@@ -184,27 +165,17 @@ if __name__ == '__main__':
             assert(p['pg_num'] == 10)
             break
     assert(poolnum is not None)
-    expect('mds/add_data_pool?pool={0}'.format(poolnum), 'PUT', 200, '')
-    expect('mds/remove_data_pool?pool={0}'.format(poolnum), 'PUT', 200, '')
+    expect('fs/add_data_pool?fs_name={1}&pool={0}'.format(poolnum,'mycephfs'), 'PUT', 200, '')
+    expect('fs/rm_data_pool?pool={0}&fs_name={1}'.format(poolnum,'mycephfs'), 'PUT', 200, '')
     expect('osd/pool/delete?pool=data2&pool2=data2'
            '&sure=--yes-i-really-really-mean-it', 'PUT', 200, '')
-    expect('mds/set?var=allow_multimds&val=true&confirm=--yes-i-really-mean-it', 'PUT', 200, '')
-    expect('mds/set_max_mds?maxmds=4', 'PUT', 200, '')
-    expect('mds/set?var=max_mds&val=4', 'PUT', 200, '')
-    expect('mds/set?var=max_file_size&val=1048576', 'PUT', 200, '')
-    expect('mds/set?var=allow_new_snaps&val=true&confirm=--yes-i-really-mean-it', 'PUT', 200, '')
-    expect('mds/set?var=allow_new_snaps&val=0', 'PUT', 200, '')
-    expect('mds/set?var=inline_data&val=true&confirm=--yes-i-really-mean-it', 'PUT', 200, '')
-    expect('mds/set?var=inline_data&val=0', 'PUT', 200, '')
-    r = expect('mds/dump.json', 'GET', 200, 'json')
-    assert(r.myjson['output']['max_mds'] == 4)
-    expect('mds/set_max_mds?maxmds=3', 'PUT', 200, '')
-    r = expect('mds/stat.json', 'GET', 200, 'json')
-    expect('mds/set?var=max_mds&val=2', 'PUT', 200, '')
-    r = expect('mds/stat.json', 'GET', 200, 'json')
-    assert('epoch' in r.myjson['output']['fsmap'])
-    r = expect('mds/stat.xml', 'GET', 200, 'xml')
-    assert(r.tree.find('output/mds_stat/fsmap/epoch') is not None)
+    expect('fs/set?fs_name=mycephfs&var=allow_multimds&val=true&confirm=--yes-i-really-mean-it', 'PUT', 200, '')
+    expect('fs/set?fs_name=mycephfs&var=max_mds&val=4', 'PUT', 200, '')
+    expect('fs/set?fs_name=mycephfs&var=max_file_size&val=1048576', 'PUT', 200, '')
+    expect('fs/set?fs_name=mycephfs&var=allow_new_snaps&val=true&confirm=--yes-i-really-mean-it', 'PUT', 200, '')
+    expect('fs/set?fs_name=mycephfs&var=allow_new_snaps&val=0', 'PUT', 200, '')
+    expect('fs/set?fs_name=mycephfs&var=inline_data&val=true&confirm=--yes-i-really-mean-it', 'PUT', 200, '')
+    expect('fs/set?fs_name=mycephfs&var=inline_data&val=0', 'PUT', 200, '')
 
     # more content tests below, just check format here
     expect('mon/dump.json', 'GET', 200, 'json')
@@ -330,7 +301,7 @@ if __name__ == '__main__':
 
     expect('pg/debug?debugop=unfound_objects_exist', 'GET', 200, '')
     expect('pg/debug?debugop=degraded_pgs_exist', 'GET', 200, '')
-    expect('pg/deep-scrub?pgid=0.0', 'PUT', 200, '')
+    expect('pg/deep-scrub?pgid=1.0', 'PUT', 200, '')
     r = expect('pg/dump', 'GET', 200, 'json', JSONHDR)
     assert('pg_stats_sum' in r.myjson['output'])
     r = expect('pg/dump', 'GET', 200, 'xml', XMLHDR)
@@ -345,31 +316,35 @@ if __name__ == '__main__':
     r = expect('pg/getmap', 'GET', 200, '')
     assert(len(r.text) != 0)
 
-    r = expect('pg/map?pgid=0.0', 'GET', 200, 'json', JSONHDR)
+    r = expect('pg/map?pgid=1.0', 'GET', 200, 'json', JSONHDR)
     assert('acting' in r.myjson['output'])
-    assert(r.myjson['output']['pgid'] == '0.0')
-    r = expect('pg/map?pgid=0.0', 'GET', 200, 'xml', XMLHDR)
+    assert(r.myjson['output']['pgid'] == '1.0')
+    r = expect('pg/map?pgid=1.0', 'GET', 200, 'xml', XMLHDR)
     assert(r.tree.find('output/pg_map/acting') is not None)
-    assert(r.tree.find('output/pg_map/pgid').text == '0.0')
+    assert(r.tree.find('output/pg_map/pgid').text == '1.0')
 
-    expect('pg/repair?pgid=0.0', 'PUT', 200, '')
-    expect('pg/scrub?pgid=0.0', 'PUT', 200, '')
+    expect('pg/repair?pgid=1.0', 'PUT', 200, '')
+    expect('pg/scrub?pgid=1.0', 'PUT', 200, '')
 
-    expect('pg/set_full_ratio?ratio=0.90', 'PUT', 200, '')
-    r = expect('pg/dump', 'GET', 200, 'json', JSONHDR)
+    expect('osd/set-full-ratio?ratio=0.90', 'PUT', 200, '')
+    r = expect('osd/dump', 'GET', 200, 'json', JSONHDR)
     assert(float(r.myjson['output']['full_ratio']) == 0.90)
-    expect('pg/set_full_ratio?ratio=0.95', 'PUT', 200, '')
-    expect('pg/set_nearfull_ratio?ratio=0.90', 'PUT', 200, '')
-    r = expect('pg/dump', 'GET', 200, 'json', JSONHDR)
-    assert(float(r.myjson['output']['near_full_ratio']) == 0.90)
-    expect('pg/set_full_ratio?ratio=0.85', 'PUT', 200, '')
+    expect('osd/set-full-ratio?ratio=0.95', 'PUT', 200, '')
+    expect('osd/set-backfillfull-ratio?ratio=0.88', 'PUT', 200, '')
+    r = expect('osd/dump', 'GET', 200, 'json', JSONHDR)
+    assert(float(r.myjson['output']['backfillfull_ratio']) == 0.88)
+    expect('osd/set-backfillfull-ratio?ratio=0.90', 'PUT', 200, '')
+    expect('osd/set-nearfull-ratio?ratio=0.90', 'PUT', 200, '')
+    r = expect('osd/dump', 'GET', 200, 'json', JSONHDR)
+    assert(float(r.myjson['output']['nearfull_ratio']) == 0.90)
+    expect('osd/set-nearfull-ratio?ratio=0.85', 'PUT', 200, '')
 
     r = expect('pg/stat', 'GET', 200, 'json', JSONHDR)
     assert('num_pgs' in r.myjson['output'])
     r = expect('pg/stat', 'GET', 200, 'xml', XMLHDR)
     assert(r.tree.find('output/pg_summary/num_pgs') is not None)
 
-    expect('tell/0.0/query', 'GET', 200, 'json', JSONHDR)
+    expect('tell/1.0/query', 'GET', 200, 'json', JSONHDR)
     expect('quorum?quorumcmd=enter', 'PUT', 200, 'json', JSONHDR)
     expect('quorum?quorumcmd=enter', 'PUT', 200, 'xml', XMLHDR)
     expect('quorum_status', 'GET', 200, 'json', JSONHDR)
@@ -399,7 +374,7 @@ if __name__ == '__main__':
     expect('osd/reweight?id=0&weight=1', 'PUT', 200, '')
 
     for v in ['pg_num', 'pgp_num', 'size', 'min_size',
-              'crush_ruleset']:
+              'crush_rule']:
         r = expect('osd/pool/get.json?pool=rbd&var=' + v, 'GET', 200, 'json')
         assert(v in r.myjson['output'])
 
@@ -414,7 +389,7 @@ if __name__ == '__main__':
     r = expect('osd/pool/get.json?pool=rbd&var=size', 'GET', 200, 'json')
     assert(r.myjson['output']['size'] == 2)
 
-    r = expect('osd/pool/get.json?pool=rbd&var=crush_ruleset', 'GET', 200, 'json')
-    assert(r.myjson['output']['crush_ruleset'] == 0)
+    r = expect('osd/pool/get.json?pool=rbd&var=crush_rule', 'GET', 200, 'json')
+    assert(r.myjson['output']['crush_rule'] == "replicated_rule")
 
     print('OK')

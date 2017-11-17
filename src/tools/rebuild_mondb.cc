@@ -223,8 +223,17 @@ int update_osdmap(ObjectStore& fs, OSDSuperblock& sb, MonitorDBStore& ms)
     t->erase(prefix, ms.combine_strings("full", e));
     ntrimmed++;
   }
-  if (!t->empty()) {
-    t->put(prefix, first_committed_name, sb.oldest_map);
+  // make sure we have a non-zero first_committed. OSDMonitor relies on this.
+  // because PaxosService::put_last_committed() set it to last_committed, if it
+  // is zero. which breaks OSDMonitor::update_from_paxos(), in which we believe
+  // that latest_full should always be greater than last_committed.
+  if (first_committed == 0 && sb.oldest_map < sb.newest_map) {
+    first_committed = 1;
+  } else if (ntrimmed) {
+    first_committed += ntrimmed;
+  }
+  if (first_committed) {
+    t->put(prefix, first_committed_name, first_committed);
     ms.apply_transaction(t);
     t = make_shared<MonitorDBStore::Transaction>();
   }
@@ -232,7 +241,7 @@ int update_osdmap(ObjectStore& fs, OSDSuperblock& sb, MonitorDBStore& ms)
   unsigned nadded = 0;
 
   OSDMap osdmap;
-  for (auto e = max(last_committed+1, sb.oldest_map);
+  for (auto e = ceph::max(last_committed+1, sb.oldest_map);
        e <= sb.newest_map; e++) {
     bool have_crc = false;
     uint32_t crc = -1;
@@ -353,20 +362,20 @@ int update_pgmap_pg(ObjectStore& fs, MonitorDBStore& ms)
     spg_t pgid;
     if (!coll.is_pg(&pgid))
       continue;
-    bufferlist bl;
     pg_info_t info(pgid);
-    map<epoch_t, pg_interval_t> past_intervals;
+    PastIntervals past_intervals;
     __u8 struct_v;
-    r = PG::read_info(&fs, pgid, coll, bl, info, past_intervals, struct_v);
+    r = PG::read_info(&fs, pgid, coll, info, past_intervals, struct_v);
     if (r < 0) {
       cerr << "failed to read_info: " << cpp_strerror(r) << std::endl;
       return r;
     }
-    if (struct_v < PG::cur_struct_v) {
+    if (struct_v < PG::get_latest_struct_v()) {
       cerr << "incompatible pg_info: v" << struct_v << std::endl;
       return -EINVAL;
     }
     version_t latest_epoch = 0;
+    bufferlist bl;
     r = ms.get(prefix, stringify(pgid.pgid), bl);
     if (r >= 0) {
       pg_stat_t pg_stat;

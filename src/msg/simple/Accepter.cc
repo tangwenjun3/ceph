@@ -54,7 +54,17 @@ static int set_close_on_exec(int fd)
 
 int Accepter::create_selfpipe(int *pipe_rd, int *pipe_wr) {
   int selfpipe[2];
+#ifdef HAVE_PIPE2
   int ret = ::pipe2(selfpipe, (O_CLOEXEC|O_NONBLOCK));
+#else
+  int ret = ::pipe(selfpipe);
+  if (ret == 0) {
+    for (int i = 0; i < ceph::size(selfpipe); i++) {
+      int f = fcntl(selfpipe[i], F_GETFD);
+      fcntl(selfpipe[i], F_SETFD, f | FD_CLOEXEC | O_NONBLOCK);
+    }
+  }
+#endif
   if (ret < 0 ) {
     lderr(msgr->cct) << __func__ << " unable to create the selfpipe: "
                     << cpp_strerror(errno) << dendl;
@@ -211,7 +221,7 @@ int Accepter::bind(const entity_addr_t &bind_addr, const set<int>& avoid_ports)
   ldout(msgr->cct,10) <<  __func__ << " bound to " << listen_addr << dendl;
 
   // listen!
-  rc = ::listen(listen_sd, 128);
+  rc = ::listen(listen_sd, msgr->cct->_conf->ms_tcp_listen_backlog);
   if (rc < 0) {
     rc = -errno;
     lderr(msgr->cct) <<  __func__ << " unable to listen on " << listen_addr

@@ -180,24 +180,6 @@ class TestPG(TestArgparse):
         assert_equal({}, validate_command(sigdict, ['pg', 'debug',
                                                     'invalid']))
 
-    def test_force_create_pg(self):
-        self.one_pgid('force_create_pg')
-
-    def set_ratio(self, command):
-        self.assert_valid_command(['pg',
-                                   command,
-                                   '0.0'])
-        assert_equal({}, validate_command(sigdict, ['pg', command]))
-        assert_equal({}, validate_command(sigdict, ['pg',
-                                                    command,
-                                                    '2.0']))
-
-    def test_set_full_ratio(self):
-        self.set_ratio('set_full_ratio')
-
-    def test_set_nearfull_ratio(self):
-        self.set_ratio('set_nearfull_ratio')
-
 
 class TestAuth(TestArgparse):
 
@@ -353,9 +335,6 @@ class TestMDS(TestArgparse):
     def test_stat(self):
         self.check_no_arg('mds', 'stat')
 
-    def test_dump(self):
-        self.check_0_or_1_natural_arg('mds', 'dump')
-
     def test_tell(self):
         self.assert_valid_command(['mds', 'tell',
                                    'someone',
@@ -374,20 +353,11 @@ class TestMDS(TestArgparse):
         assert_equal({}, validate_command(sigdict, ['mds', 'compat',
                                                     'show', 'toomany']))
 
-    def test_stop(self):
-        self.assert_valid_command(['mds', 'stop', 'someone'])
-        assert_equal({}, validate_command(sigdict, ['mds', 'stop']))
-        assert_equal({}, validate_command(sigdict, ['mds', 'stop',
-                                                    'someone', 'toomany']))
-
     def test_deactivate(self):
         self.assert_valid_command(['mds', 'deactivate', 'someone'])
         assert_equal({}, validate_command(sigdict, ['mds', 'deactivate']))
         assert_equal({}, validate_command(sigdict, ['mds', 'deactivate',
                                                     'someone', 'toomany']))
-
-    def test_set_max_mds(self):
-        self.check_1_natural_arg('mds', 'set_max_mds')
 
     def test_set_state(self):
         self.assert_valid_command(['mds', 'set_state', '1', '2'])
@@ -417,12 +387,6 @@ class TestMDS(TestArgparse):
                                                     '--yes-i-really-mean-it',
                                                     'toomany']))
 
-    def test_cluster_down(self):
-        self.check_no_arg('mds', 'cluster_down')
-
-    def test_cluster_up(self):
-        self.check_no_arg('mds', 'cluster_up')
-
     def test_compat_rm_compat(self):
         self.assert_valid_command(['mds', 'compat', 'rm_compat', '1'])
         assert_equal({}, validate_command(sigdict, ['mds',
@@ -447,45 +411,6 @@ class TestMDS(TestArgparse):
                                                     'compat',
                                                     'rm_incompat', '1', '1']))
 
-    def test_mds_set(self):
-        self.assert_valid_command(['mds', 'set', 'max_mds', '2'])
-        self.assert_valid_command(['mds', 'set', 'max_file_size', '2'])
-        self.assert_valid_command(['mds', 'set', 'allow_new_snaps', 'no'])
-        assert_equal({}, validate_command(sigdict, ['mds',
-                                                    'set',
-                                                    'invalid']))
-
-    def test_add_data_pool(self):
-        self.assert_valid_command(['mds', 'add_data_pool', '1'])
-        self.assert_valid_command(['mds', 'add_data_pool', 'foo'])
-
-    def test_remove_data_pool(self):
-        self.assert_valid_command(['mds', 'remove_data_pool', '1'])
-        self.assert_valid_command(['mds', 'remove_data_pool', 'foo'])
-
-    def test_newfs(self):
-        self.assert_valid_command(['mds', 'newfs', '1', '2',
-                                   '--yes-i-really-mean-it'])
-        self.assert_valid_command(['mds', 'newfs', '1', '2'])
-        assert_equal({}, validate_command(sigdict, ['mds', 'newfs']))
-        assert_equal({}, validate_command(sigdict, ['mds', 'newfs', '1']))
-        assert_equal({}, validate_command(sigdict, ['mds',
-                                                    'newfs',
-                                                    '1',
-                                                    '2',
-                                                    '--yes-i-really-mean-it',
-                                                    'toomany']))
-        assert_equal({}, validate_command(sigdict, ['mds',
-                                                    'newfs',
-                                                    '-1',
-                                                    '2',
-                                                    '--yes-i-really-mean-it']))
-        assert_equal({}, validate_command(sigdict, ['mds',
-                                                    'newfs',
-                                                    '1',
-                                                    '-1',
-                                                    '--yes-i-really-mean-it']))
-
 
 class TestFS(TestArgparse):
     
@@ -494,6 +419,31 @@ class TestFS(TestArgparse):
     
     def test_fs_new(self):
         self.assert_valid_command(['fs', 'new', 'default', 'metadata', 'data'])
+
+    def test_fs_set_max_mds(self):
+        self.assert_valid_command(['fs', 'set', 'default', 'max_mds', '1'])
+        self.assert_valid_command(['fs', 'set', 'default', 'max_mds', '2'])
+
+    def test_fs_set_cluster_down(self):
+        self.assert_valid_command(['fs', 'set', 'default', 'cluster_down', 'true'])
+
+    def test_fs_set_cluster_up(self):
+        self.assert_valid_command(['fs', 'set', 'default', 'cluster_down', 'false'])
+
+    def test_fs_set(self):
+        self.assert_valid_command(['fs', 'set', 'default', 'max_file_size', '2'])
+        self.assert_valid_command(['fs', 'set', 'default', 'allow_new_snaps', 'no'])
+        assert_equal({}, validate_command(sigdict, ['fs',
+                                                    'set',
+                                                    'invalid']))
+
+    def test_fs_add_data_pool(self):
+        self.assert_valid_command(['fs', 'add_data_pool', 'default', '1'])
+        self.assert_valid_command(['fs', 'add_data_pool', 'default', 'foo'])
+
+    def test_fs_remove_data_pool(self):
+        self.assert_valid_command(['fs', 'rm_data_pool', 'default', '1'])
+        self.assert_valid_command(['fs', 'rm_data_pool', 'default', 'foo'])
 
     def test_fs_rm(self):
         self.assert_valid_command(['fs', 'rm', 'default'])
@@ -508,6 +458,7 @@ class TestFS(TestArgparse):
         self.assert_valid_command(['fs', 'set-default', 'cephfs'])
         assert_equal({}, validate_command(sigdict, ['fs', 'set-default']))
         assert_equal({}, validate_command(sigdict, ['fs', 'set-default', 'cephfs', 'toomany']))
+
 
 class TestMon(TestArgparse):
 
@@ -631,13 +582,11 @@ class TestOSD(TestArgparse):
     def test_crush_add_bucket(self):
         self.assert_valid_command(['osd', 'crush', 'add-bucket',
                                    'name', 'type'])
+        self.assert_valid_command(['osd', 'crush', 'add-bucket',
+                                   'name', 'type', 'root=foo-root', 'host=foo-host'])
         assert_equal({}, validate_command(sigdict, ['osd', 'crush']))
         assert_equal({}, validate_command(sigdict, ['osd', 'crush',
                                                     'add-bucket']))
-        assert_equal({}, validate_command(sigdict, ['osd', 'crush',
-                                                    'add-bucket', 'name',
-                                                    'type',
-                                                    'toomany']))
         assert_equal({}, validate_command(sigdict, ['osd', 'crush',
                                                     'add-bucket', '^^^',
                                                     'type']))
@@ -1030,9 +979,6 @@ class TestOSD(TestArgparse):
         self.assert_valid_command(['osd', 'pool', 'delete',
                                    'poolname'])
         assert_equal({}, validate_command(sigdict, ['osd', 'pool', 'delete']))
-        assert_equal({}, validate_command(sigdict, ['osd', 'pool', 'delete',
-                                                    'poolname', 'poolname',
-                                                    'not really']))
         assert_equal({}, validate_command(sigdict,
                                           ['osd', 'pool', 'delete',
                                            'poolname', 'poolname',
@@ -1050,8 +996,8 @@ class TestOSD(TestArgparse):
                                                     'toomany']))
 
     def test_pool_get(self):
-        for var in ('size', 'min_size', 'crash_replay_interval',
-                    'pg_num', 'pgp_num', 'crush_ruleset', 'auid', 'fast_read',
+        for var in ('size', 'min_size',
+                    'pg_num', 'pgp_num', 'crush_rule', 'auid', 'fast_read',
                     'scrub_min_interval', 'scrub_max_interval',
                     'deep_scrub_interval', 'recovery_priority',
                     'recovery_op_priority'):
@@ -1069,8 +1015,8 @@ class TestOSD(TestArgparse):
                                                     'invalid']))
 
     def test_pool_set(self):
-        for var in ('size', 'min_size', 'crash_replay_interval',
-                    'pg_num', 'pgp_num', 'crush_ruleset',
+        for var in ('size', 'min_size',
+                    'pg_num', 'pgp_num', 'crush_rule',
                     'hashpspool', 'auid', 'fast_read',
                     'scrub_min_interval', 'scrub_max_interval',
                     'deep_scrub_interval', 'recovery_priority',
@@ -1153,6 +1099,24 @@ class TestOSD(TestArgparse):
                                                     'poolname',
                                                     'toomany']))
 
+    def set_ratio(self, command):
+        self.assert_valid_command(['osd',
+                                   command,
+                                   '0.0'])
+        assert_equal({}, validate_command(sigdict, ['osd', command]))
+        assert_equal({}, validate_command(sigdict, ['osd',
+                                                    command,
+                                                    '2.0']))
+
+    def test_set_full_ratio(self):
+        self.set_ratio('set-full-ratio')
+
+    def test_set_backfillfull_ratio(self):
+        self.set_ratio('set-backfillfull-ratio')
+
+    def test_set_nearfull_ratio(self):
+        self.set_ratio('set-nearfull-ratio')
+
 
 class TestConfigKey(TestArgparse):
 
@@ -1174,6 +1138,9 @@ class TestConfigKey(TestArgparse):
 
     def test_exists(self):
         self.check_1_string_arg('config-key', 'exists')
+
+    def test_dump(self):
+        self.check_no_arg('config-key', 'dump')
 
     def test_list(self):
         self.check_no_arg('config-key', 'list')

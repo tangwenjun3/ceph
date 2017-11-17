@@ -12,11 +12,11 @@ These are exciting times in the Ceph community! Get involved!
 | **Blog**             | Check the Ceph Blog_ periodically to keep track | http://ceph.com/community/blog/               |
 |                      | of Ceph progress and important announcements.   |                                               |
 +----------------------+-------------------------------------------------+-----------------------------------------------+
-| **Planet Ceph**      | Check the blog aggregation on Planet Ceph for   | http://ceph.com/community/planet-ceph/        |
+| **Planet Ceph**      | Check the blog aggregation on Planet Ceph for   | https://ceph.com/category/planet/             |
 |                      | interesting stories, information and            |                                               |
 |                      | experiences from the community.                 |                                               |
 +----------------------+-------------------------------------------------+-----------------------------------------------+
-| **Wiki**             | Check the Ceph Wiki is a source for more        | https://wiki.ceph.com/                        |
+| **Wiki**             | Check the Ceph Wiki is a source for more        | http://wiki.ceph.com/                         |
 |                      | community and development related topics. You   |                                               |
 |                      | can find there information about blueprints,    |                                               |
 |                      | meetups, the Ceph Developer Summits and more.   |                                               |
@@ -65,7 +65,7 @@ These are exciting times in the Ceph community! Get involved!
 +----------------------+-------------------------------------------------+-----------------------------------------------+
 | **Source Code**      | If you would like to participate in             |                                               |
 |                      | development, bug fixing, or if you just want    | - http://github.com/ceph/ceph                 |
-|                      | the very latest code for Ceph, you can get it   | - http://ceph.com/download                    |
+|                      | the very latest code for Ceph, you can get it   | - http://download.ceph.com/tarballs/          |
 |                      | at http://github.com. See `Ceph Source Code`_   |                                               |
 |                      | for details on cloning from github.             |                                               |
 +----------------------+-------------------------------------------------+-----------------------------------------------+

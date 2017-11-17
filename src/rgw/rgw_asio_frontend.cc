@@ -1,28 +1,18 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
 // vim: ts=8 sw=2 smarttab
 
+#include <atomic>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <vector>
 
 #include <boost/asio.hpp>
-#include <boost/optional.hpp>
 
-#include <beast/core/placeholders.hpp>
-#include <beast/core/streambuf.hpp>
-#include <beast/http/empty_body.hpp>
-#include <beast/http/parse_error.hpp>
-#include <beast/http/read.hpp>
-#include <beast/http/write.hpp>
-
-#include "rgw_asio_frontend.h"
 #include "rgw_asio_client.h"
+#include "rgw_asio_frontend.h"
 
 #define dout_subsys ceph_subsys_rgw
-
-#undef dout_prefix
-#define dout_prefix (*_dout << "asio: ")
 
 namespace {
 
@@ -70,71 +60,137 @@ void Pauser::wait()
 }
 
 using tcp = boost::asio::ip::tcp;
+namespace beast = boost::beast;
 
-class AsioConnection : public std::enable_shared_from_this<AsioConnection> {
+class Connection {
   RGWProcessEnv& env;
-  boost::asio::io_service::strand strand;
+  boost::asio::strand strand;
   tcp::socket socket;
-  tcp::endpoint endpoint;
-  beast::streambuf buf;
-  beast::http::request_v1<RGWBufferlistBody> request;
 
- public:
-  void on_read(boost::system::error_code ec) {
-    auto cct = env.store->ctx();
-    if (ec) {
-      if (ec.category() == beast::http::get_parse_error_category()) {
-        ldout(cct, 1) << "parse failed: " << ec.message() << dendl;
-      } else {
-        ldout(cct, 1) << "read failed: " << ec.message() << dendl;
-      }
-      write_bad_request();
+  // references are bound to callbacks for async operations. if a callback
+  // function returns without issuing another operation, the reference is
+  // dropped and the Connection is deleted/closed
+  std::atomic<int> nref{0};
+  using Ref = boost::intrusive_ptr<Connection>;
+
+  // limit header to 4k, since we read it all into a single flat_buffer
+  static constexpr size_t header_limit = 4096;
+  // don't impose a limit on the body, since we read it in pieces
+  static constexpr size_t body_limit = std::numeric_limits<size_t>::max();
+
+  beast::flat_buffer buffer;
+  boost::optional<rgw::asio::parser_type> parser;
+
+  using bad_response_type = beast::http::response<beast::http::empty_body>;
+  boost::optional<bad_response_type> response;
+
+  CephContext* ctx() const { return env.store->ctx(); }
+
+  void read_header() {
+    // configure the parser
+    parser.emplace();
+    parser->header_limit(header_limit);
+    parser->body_limit(body_limit);
+
+    // parse the header
+    beast::http::async_read_header(socket, buffer, *parser, strand.wrap(
+            std::bind(&Connection::on_header, Ref{this},
+                      std::placeholders::_1)));
+  }
+
+  void discard_unread_message() {
+    if (parser->is_done()) {
+      // nothing left to discard, start reading the next message
+      read_header();
       return;
     }
+
+    // read the rest of the request into a static buffer. multiple clients could
+    // write at the same time, but this is okay because we never read it back
+    static std::array<char, 1024> discard_buffer;
+
+    auto& body = parser->get().body();
+    body.size = discard_buffer.size();
+    body.data = discard_buffer.data();
+
+    beast::http::async_read_some(socket, buffer, *parser, strand.wrap(
+            std::bind(&Connection::on_discard_unread, Ref{this},
+                      std::placeholders::_1)));
+  }
+
+  void on_discard_unread(boost::system::error_code ec) {
+    if (ec == boost::asio::error::connection_reset) {
+      return;
+    }
+    if (ec) {
+      ldout(ctx(), 5) << "discard_unread_message failed: "
+          << ec.message() << dendl;
+      return;
+    }
+    discard_unread_message();
+  }
+
+  void on_write_error(boost::system::error_code ec) {
+    if (ec) {
+      ldout(ctx(), 5) << "failed to write response: " << ec.message() << dendl;
+    }
+  }
+
+  void on_header(boost::system::error_code ec) {
+    if (ec == boost::asio::error::connection_reset ||
+        ec == beast::http::error::end_of_stream) {
+      return;
+    }
+    if (ec) {
+      auto& message = parser->get();
+      ldout(ctx(), 1) << "failed to read header: " << ec.message() << dendl;
+      ldout(ctx(), 1) << "====== req done http_status=400 ======" << dendl;
+      response.emplace();
+      response->result(beast::http::status::bad_request);
+      response->version(message.version() == 10 ? 10 : 11);
+      response->prepare_payload();
+      beast::http::async_write(socket, *response, strand.wrap(
+            std::bind(&Connection::on_write_error, Ref{this},
+                      std::placeholders::_1)));
+      return;
+    }
+
+    // process the request
     RGWRequest req{env.store->get_new_req_id()};
-    RGWAsioClientIO real_client{std::move(socket), std::move(request)};
+
+    rgw::asio::ClientIO real_client{socket, *parser, buffer};
+
     auto real_client_io = rgw::io::add_reordering(
-                            rgw::io::add_buffering(
+                            rgw::io::add_buffering(ctx(),
                               rgw::io::add_chunking(
                                 rgw::io::add_conlen_controlling(
                                   &real_client))));
-    RGWRestfulIO client(&real_client_io);
-    process_request(env.store, env.rest, &req, env.uri_prefix, &client,
-                    env.olog);
-  }
+    RGWRestfulIO client(ctx(), &real_client_io);
+    process_request(env.store, env.rest, &req, env.uri_prefix,
+                    *env.auth_registry, &client, env.olog);
 
-  void write_bad_request() {
-    beast::http::response_v1<beast::http::empty_body> response;
-    response.status = 400;
-    response.reason = "Bad Request";
-    /* If the request is so terribly malformed that we can't extract even
-     * the protocol version, we will use HTTP/1.1 as a fallback. */
-    response.version = request.version ? request.version : 11;
-    beast::http::prepare(response);
-    beast::http::async_write(socket, std::move(response),
-                             std::bind(&AsioConnection::on_write,
-                                       shared_from_this(),
-                                       beast::asio::placeholders::error));
-  }
-
-  void on_write(boost::system::error_code ec) {
-    auto cct = env.store->ctx();
-    if (ec) {
-      ldout(cct, 1) << "write failed: " << ec.message() << dendl;
+    if (parser->is_keep_alive()) {
+      // parse any unread bytes from the previous message (in case we replied
+      // before reading the entire body) before reading the next
+      discard_unread_message();
     }
   }
 
  public:
-  AsioConnection(RGWProcessEnv& env, tcp::socket&& socket)
-    : env(env), strand(socket.get_io_service()), socket(std::move(socket))
-  {}
+  Connection(RGWProcessEnv& env, tcp::socket&& socket)
+    : env(env), strand(socket.get_io_service()), socket(std::move(socket)) {}
 
-  void read() {
-    beast::http::async_read(socket, buf, request, strand.wrap(
-            std::bind(&AsioConnection::on_read, shared_from_this(),
-                      beast::asio::placeholders::error)));
+  void on_connect() {
+    read_header();
   }
+
+  void get() { ++nref; }
+  void put() { if (nref.fetch_sub(1) == 1) { delete this; } }
+
+  friend void intrusive_ptr_add_ref(Connection *c) { c->get(); }
+  friend void intrusive_ptr_release(Connection *c) { c->put(); }
 };
+
 
 class AsioFrontend {
   RGWProcessEnv env;
@@ -160,7 +216,7 @@ class AsioFrontend {
   void stop();
   void join();
   void pause();
-  void unpause(RGWRados *store);
+  void unpause(RGWRados* store, rgw_auth_registry_ptr_t);
 };
 
 int AsioFrontend::init()
@@ -168,9 +224,19 @@ int AsioFrontend::init()
   auto ep = tcp::endpoint{tcp::v4(), static_cast<unsigned short>(env.port)};
   ldout(ctx(), 4) << "frontend listening on " << ep << dendl;
 
-  acceptor.open(ep.protocol());
+  boost::system::error_code ec;
+  acceptor.open(ep.protocol(), ec);
+  if (ec) {
+    lderr(ctx()) << "failed to open socket: " << ec.message() << dendl;
+    return -ec.value();
+  }
   acceptor.set_option(tcp::acceptor::reuse_address(true));
-  acceptor.bind(ep);
+  acceptor.bind(ep, ec);
+  if (ec) {
+    lderr(ctx()) << "failed to bind address " << ep <<
+        ": " << ec.message() << dendl;
+    return -ec.value();
+  }
   acceptor.listen(boost::asio::socket_base::max_connections);
   acceptor.async_accept(peer_socket,
                         [this] (boost::system::error_code ec) {
@@ -189,13 +255,14 @@ void AsioFrontend::accept(boost::system::error_code ec)
     throw ec;
   }
   auto socket = std::move(peer_socket);
-
   acceptor.async_accept(peer_socket,
                         [this] (boost::system::error_code ec) {
                           return accept(ec);
                         });
 
-  std::make_shared<AsioConnection>(env, std::move(socket))->read();
+  boost::intrusive_ptr<Connection> conn{new Connection(env, std::move(socket))};
+  conn->on_connect();
+  // reference drops here, but on_connect() takes another
 }
 
 int AsioFrontend::run()
@@ -227,7 +294,10 @@ void AsioFrontend::stop()
   going_down = true;
 
   boost::system::error_code ec;
-  acceptor.close(ec); // unblock the run() threads
+  acceptor.close(ec);
+
+  // unblock the run() threads
+  service.stop();
 }
 
 void AsioFrontend::join()
@@ -246,22 +316,19 @@ void AsioFrontend::pause()
 {
   ldout(ctx(), 4) << "frontend pausing threads..." << dendl;
   pauser.pause(threads.size(), [=] {
-    // stop accepting but leave the port open
-    boost::system::error_code ec;
-    acceptor.cancel(ec);
+    // unblock the run() threads
+    service.stop();
   });
   ldout(ctx(), 4) << "frontend paused" << dendl;
 }
 
-void AsioFrontend::unpause(RGWRados *store)
+void AsioFrontend::unpause(RGWRados* const store,
+                           rgw_auth_registry_ptr_t auth_registry)
 {
   env.store = store;
+  env.auth_registry = std::move(auth_registry);
   ldout(ctx(), 4) << "frontend unpaused" << dendl;
   service.reset();
-  acceptor.async_accept(peer_socket,
-                        [this] (boost::system::error_code ec) {
-                          return accept(ec);
-                        });
   pauser.unpause();
 }
 
@@ -304,7 +371,9 @@ void RGWAsioFrontend::pause_for_new_config()
   impl->pause();
 }
 
-void RGWAsioFrontend::unpause_with_new_config(RGWRados *store)
-{
-  impl->unpause(store);
+void RGWAsioFrontend::unpause_with_new_config(
+  RGWRados* const store,
+  rgw_auth_registry_ptr_t auth_registry
+) {
+  impl->unpause(store, std::move(auth_registry));
 }

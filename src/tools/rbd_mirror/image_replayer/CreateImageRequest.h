@@ -7,7 +7,7 @@
 #include "include/int_types.h"
 #include "include/types.h"
 #include "include/rados/librados.hpp"
-#include "librbd/parent_types.h"
+#include "librbd/Types.h"
 #include <string>
 
 class Context;
@@ -26,17 +26,19 @@ public:
                                     const std::string &global_image_id,
                                     const std::string &remote_mirror_uuid,
                                     const std::string &local_image_name,
+				    const std::string &local_image_id,
                                     ImageCtxT *remote_image_ctx,
                                     Context *on_finish) {
     return new CreateImageRequest(local_io_ctx, work_queue, global_image_id,
                                   remote_mirror_uuid, local_image_name,
-                                  remote_image_ctx, on_finish);
+                                  local_image_id, remote_image_ctx, on_finish);
   }
 
   CreateImageRequest(librados::IoCtx &local_io_ctx, ContextWQ *work_queue,
                      const std::string &global_image_id,
                      const std::string &remote_mirror_uuid,
                      const std::string &local_image_name,
+		     const std::string &local_image_id,
                      ImageCtxT *remote_image_ctx,
                      Context *on_finish);
 
@@ -84,16 +86,17 @@ private:
   std::string m_global_image_id;
   std::string m_remote_mirror_uuid;
   std::string m_local_image_name;
+  std::string m_local_image_id;
   ImageCtxT *m_remote_image_ctx;
   Context *m_on_finish;
 
   librados::IoCtx m_remote_parent_io_ctx;
   ImageCtxT *m_remote_parent_image_ctx = nullptr;
-  librbd::parent_spec m_remote_parent_spec;
+  librbd::ParentSpec m_remote_parent_spec;
 
   librados::IoCtx m_local_parent_io_ctx;
   ImageCtxT *m_local_parent_image_ctx = nullptr;
-  librbd::parent_spec m_local_parent_spec;
+  librbd::ParentSpec m_local_parent_spec;
 
   bufferlist m_out_bl;
   std::string m_parent_global_image_id;

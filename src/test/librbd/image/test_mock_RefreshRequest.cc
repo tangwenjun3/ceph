@@ -4,6 +4,7 @@
 #include "test/librbd/test_mock_fixture.h"
 #include "test/librbd/test_support.h"
 #include "test/librbd/mock/MockImageCtx.h"
+#include "test/librbd/mock/MockImageWatcher.h"
 #include "test/librbd/mock/MockJournal.h"
 #include "test/librbd/mock/MockJournalPolicy.h"
 #include "test/librbd/mock/MockObjectMap.h"
@@ -37,14 +38,14 @@ template <>
 struct RefreshParentRequest<MockRefreshImageCtx> {
   static RefreshParentRequest* s_instance;
   static RefreshParentRequest* create(MockRefreshImageCtx &mock_image_ctx,
-                                      const parent_info& parent_md,
+                                      const ParentInfo& parent_md,
                                       Context *on_finish) {
     assert(s_instance != nullptr);
     s_instance->on_finish = on_finish;
     return s_instance;
   }
   static bool is_refresh_required(MockRefreshImageCtx &mock_image_ctx,
-                                  const parent_info& parent_md) {
+                                  const ParentInfo& parent_md) {
     assert(s_instance != nullptr);
     return s_instance->is_refresh_required();
   }
@@ -97,12 +98,10 @@ public:
   typedef RefreshRequest<MockRefreshImageCtx> MockRefreshRequest;
   typedef RefreshParentRequest<MockRefreshImageCtx> MockRefreshParentRequest;
 
-  void expect_set_require_lock_on_read(MockRefreshImageCtx &mock_image_ctx) {
-    EXPECT_CALL(*mock_image_ctx.aio_work_queue, set_require_lock_on_read());
-  }
-
-  void expect_clear_require_lock_on_read(MockRefreshImageCtx &mock_image_ctx) {
-    EXPECT_CALL(*mock_image_ctx.aio_work_queue, clear_require_lock_on_read());
+  void expect_set_require_lock(MockRefreshImageCtx &mock_image_ctx,
+                               librbd::io::Direction direction, bool enabled) {
+    EXPECT_CALL(*mock_image_ctx.io_work_queue, set_require_lock(direction,
+                                                                enabled));
   }
 
   void expect_v1_read_header(MockRefreshImageCtx &mock_image_ctx, int r) {
@@ -154,6 +153,18 @@ public:
       EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
                   exec(mock_image_ctx.header_oid, _, StrEq("lock"), StrEq("get_info"), _, _, _))
                     .WillOnce(DoDefault());
+    }
+  }
+
+  void expect_get_metadata(MockRefreshImageCtx &mock_image_ctx, int r) {
+    auto &expect = EXPECT_CALL(get_mock_io_ctx(mock_image_ctx.md_ctx),
+                               exec(mock_image_ctx.header_oid, _, StrEq("rbd"), StrEq("metadata_list"), _, _, _));
+    if (r < 0) {
+      expect.WillOnce(Return(r));
+    } else {
+      expect.WillOnce(DoDefault());
+      EXPECT_CALL(*mock_image_ctx.image_watcher, is_unregistered())
+        .WillOnce(Return(false));
     }
   }
 
@@ -218,9 +229,15 @@ public:
     }
   }
 
+  void expect_apply_metadata(MockRefreshImageCtx &mock_image_ctx,
+			     int r) {
+    EXPECT_CALL(mock_image_ctx, apply_metadata(_, false))
+		  .WillOnce(Return(r));
+  }
+
   void expect_add_snap(MockRefreshImageCtx &mock_image_ctx,
                        const std::string &snap_name, uint64_t snap_id) {
-    EXPECT_CALL(mock_image_ctx, add_snap(snap_name, _, snap_id, _, _, _, _, _));
+    EXPECT_CALL(mock_image_ctx, add_snap(_, snap_name, snap_id, _, _, _, _, _));
   }
 
   void expect_init_exclusive_lock(MockRefreshImageCtx &mock_image_ctx,
@@ -320,17 +337,19 @@ public:
   }
 
   void expect_get_snap_id(MockRefreshImageCtx &mock_image_ctx,
-                          const std::string &snap_name, uint64_t snap_id) {
-    EXPECT_CALL(mock_image_ctx, get_snap_id(snap_name)).WillOnce(Return(snap_id));
+                          const std::string &snap_name,
+			  uint64_t snap_id) {
+    EXPECT_CALL(mock_image_ctx,
+		get_snap_id(_, snap_name)).WillOnce(Return(snap_id));
   }
 
   void expect_block_writes(MockImageCtx &mock_image_ctx, int r) {
-    EXPECT_CALL(*mock_image_ctx.aio_work_queue, block_writes(_))
+    EXPECT_CALL(*mock_image_ctx.io_work_queue, block_writes(_))
                   .WillOnce(CompleteContext(r, mock_image_ctx.image_ctx->op_work_queue));
   }
 
   void expect_unblock_writes(MockImageCtx &mock_image_ctx) {
-    EXPECT_CALL(*mock_image_ctx.aio_work_queue, unblock_writes())
+    EXPECT_CALL(*mock_image_ctx.io_work_queue, unblock_writes())
                   .Times(1);
   }
 
@@ -398,6 +417,8 @@ TEST_F(TestMockImageRefreshRequest, SuccessV2) {
 
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   expect_refresh_parent_is_required(mock_refresh_parent_request, false);
@@ -427,6 +448,8 @@ TEST_F(TestMockImageRefreshRequest, SuccessSnapshotV2) {
 
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
@@ -452,7 +475,7 @@ TEST_F(TestMockImageRefreshRequest, SuccessSetSnapshotV2) {
   librbd::ImageCtx *ictx;
   ASSERT_EQ(0, open_image(m_image_name, &ictx));
   ASSERT_EQ(0, snap_create(*ictx, "snap"));
-  ASSERT_EQ(0, librbd::snap_set(ictx, "snap"));
+  ASSERT_EQ(0, librbd::snap_set(ictx, cls::rbd::UserSnapshotNamespace(), "snap"));
 
   MockRefreshImageCtx mock_image_ctx(*ictx);
   MockRefreshParentRequest mock_refresh_parent_request;
@@ -462,6 +485,8 @@ TEST_F(TestMockImageRefreshRequest, SuccessSetSnapshotV2) {
 
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
@@ -499,7 +524,7 @@ TEST_F(TestMockImageRefreshRequest, SuccessChild) {
 
     librbd::NoOpProgressContext no_op;
     ASSERT_EQ(0, librbd::remove(m_ioctx, clone_name, "", no_op));
-    ASSERT_EQ(0, ictx->operations->snap_unprotect("snap"));
+    ASSERT_EQ(0, ictx->operations->snap_unprotect(cls::rbd::UserSnapshotNamespace(), "snap"));
   };
 
   int order = ictx->order;
@@ -516,6 +541,8 @@ TEST_F(TestMockImageRefreshRequest, SuccessChild) {
 
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   expect_refresh_parent_is_required(*mock_refresh_parent_request, true);
@@ -550,7 +577,7 @@ TEST_F(TestMockImageRefreshRequest, SuccessChildDontOpenParent) {
 
     librbd::NoOpProgressContext no_op;
     ASSERT_EQ(0, librbd::remove(m_ioctx, clone_name, "", no_op));
-    ASSERT_EQ(0, ictx->operations->snap_unprotect("snap"));
+    ASSERT_EQ(0, ictx->operations->snap_unprotect(cls::rbd::UserSnapshotNamespace(), "snap"));
   };
 
   int order = ictx->order;
@@ -566,6 +593,8 @@ TEST_F(TestMockImageRefreshRequest, SuccessChildDontOpenParent) {
 
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   if (ictx->test_features(RBD_FEATURE_EXCLUSIVE_LOCK)) {
@@ -628,6 +657,8 @@ TEST_F(TestMockImageRefreshRequest, DisableExclusiveLock) {
   // and journaling were never enabled (or active)
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   expect_refresh_parent_is_required(mock_refresh_parent_request, false);
@@ -679,6 +710,8 @@ TEST_F(TestMockImageRefreshRequest, DisableExclusiveLockWhileAcquiringLock) {
   // and journaling were never enabled (or active)
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   expect_refresh_parent_is_required(mock_refresh_parent_request, false);
@@ -720,6 +753,8 @@ TEST_F(TestMockImageRefreshRequest, JournalDisabledByPolicy) {
 
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   expect_refresh_parent_is_required(mock_refresh_parent_request, false);
@@ -766,6 +801,8 @@ TEST_F(TestMockImageRefreshRequest, EnableJournalWithExclusiveLock) {
   // journal should be immediately opened if exclusive lock owned
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   expect_refresh_parent_is_required(mock_refresh_parent_request, false);
@@ -811,10 +848,12 @@ TEST_F(TestMockImageRefreshRequest, EnableJournalWithoutExclusiveLock) {
   // do not open the journal if exclusive lock is not owned
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   expect_refresh_parent_is_required(mock_refresh_parent_request, false);
-  expect_set_require_lock_on_read(mock_image_ctx);
+  expect_set_require_lock(mock_image_ctx, librbd::io::DIRECTION_BOTH, true);
 
   C_SaferCond ctx;
   MockRefreshRequest *req = new MockRefreshRequest(mock_image_ctx, false, false, &ctx);
@@ -854,11 +893,15 @@ TEST_F(TestMockImageRefreshRequest, DisableJournal) {
   // verify journal is closed if feature disabled
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   expect_refresh_parent_is_required(mock_refresh_parent_request, false);
   expect_block_writes(mock_image_ctx, 0);
-  expect_clear_require_lock_on_read(mock_image_ctx);
+  if (!mock_image_ctx.clone_copy_on_read) {
+    expect_set_require_lock(mock_image_ctx, librbd::io::DIRECTION_READ, false);
+  }
   expect_close_journal(mock_image_ctx, *mock_journal, 0);
   expect_unblock_writes(mock_image_ctx);
 
@@ -895,6 +938,8 @@ TEST_F(TestMockImageRefreshRequest, EnableObjectMapWithExclusiveLock) {
   // object map should be immediately opened if exclusive lock owned
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   expect_refresh_parent_is_required(mock_refresh_parent_request, false);
@@ -931,6 +976,8 @@ TEST_F(TestMockImageRefreshRequest, EnableObjectMapWithoutExclusiveLock) {
   // do not open the object map if exclusive lock is not owned
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   expect_refresh_parent_is_required(mock_refresh_parent_request, false);
@@ -978,6 +1025,8 @@ TEST_F(TestMockImageRefreshRequest, DisableObjectMap) {
   // verify object map is closed if feature disabled
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   expect_refresh_parent_is_required(mock_refresh_parent_request, false);
@@ -1016,6 +1065,8 @@ TEST_F(TestMockImageRefreshRequest, OpenObjectMapError) {
   // object map should be immediately opened if exclusive lock owned
   InSequence seq;
   expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, 0);
   expect_get_flags(mock_image_ctx, 0);
   expect_get_group(mock_image_ctx, 0);
   expect_refresh_parent_is_required(mock_refresh_parent_request, false);
@@ -1027,6 +1078,36 @@ TEST_F(TestMockImageRefreshRequest, OpenObjectMapError) {
 
   ASSERT_EQ(0, ctx.wait());
   ASSERT_EQ(nullptr, mock_image_ctx.object_map);
+}
+
+TEST_F(TestMockImageRefreshRequest, ApplyMetadataError) {
+  REQUIRE_FORMAT_V2();
+
+  librbd::ImageCtx *ictx;
+  ASSERT_EQ(0, open_image(m_image_name, &ictx));
+
+  MockRefreshImageCtx mock_image_ctx(*ictx);
+  MockRefreshParentRequest mock_refresh_parent_request;
+  MockExclusiveLock mock_exclusive_lock;
+  expect_op_work_queue(mock_image_ctx);
+  expect_test_features(mock_image_ctx);
+
+  InSequence seq;
+  expect_get_mutable_metadata(mock_image_ctx, 0);
+  expect_get_metadata(mock_image_ctx, 0);
+  expect_apply_metadata(mock_image_ctx, -EINVAL);
+  expect_get_flags(mock_image_ctx, 0);
+  expect_get_group(mock_image_ctx, 0);
+  expect_refresh_parent_is_required(mock_refresh_parent_request, false);
+  if (ictx->test_features(RBD_FEATURE_EXCLUSIVE_LOCK)) {
+    expect_init_exclusive_lock(mock_image_ctx, mock_exclusive_lock, 0);
+  }
+
+  C_SaferCond ctx;
+  MockRefreshRequest *req = new MockRefreshRequest(mock_image_ctx, false, false, &ctx);
+  req->send();
+
+  ASSERT_EQ(0, ctx.wait());
 }
 
 } // namespace image

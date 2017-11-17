@@ -29,30 +29,30 @@ class MMonGetVersion : public Message {
 public:
   MMonGetVersion() : Message(CEPH_MSG_MON_GET_VERSION) {}
 
-  const char *get_type_name() const {
+  const char *get_type_name() const override {
     return "mon_get_version";
   }
 
-  void print(ostream& o) const {
+  void print(ostream& o) const override {
     o << "mon_get_version(what=" << what << " handle=" << handle << ")";
   }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(handle, payload);
     ::encode(what, payload);
   }
 
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(handle, p);
     ::decode(what, p);
   }
 
-  ceph_tid_t handle;
+  ceph_tid_t handle = 0;
   string what;
 
 private:
-  ~MMonGetVersion() {}
+  ~MMonGetVersion() override {}
 };
 
 #endif

@@ -20,6 +20,7 @@
 #include "include/ceph_features.h"
 #include "common/hobject.h"
 #include <atomic>
+#include "common/mClockCommon.h"
 
 /*
  * OSD op
@@ -33,15 +34,15 @@ class OSD;
 
 class MOSDOp : public MOSDFastDispatchOp {
 
-  static const int HEAD_VERSION = 8;
+  static const int HEAD_VERSION = 9;
   static const int COMPAT_VERSION = 3;
 
 private:
-  uint32_t client_inc;
-  __u32 osdmap_epoch;
-  __u32 flags;
+  uint32_t client_inc = 0;
+  __u32 osdmap_epoch = 0;
+  __u32 flags = 0;
   utime_t mtime;
-  int32_t retry_attempt;   // 0 is first attempt.  -1 if we don't know.
+  int32_t retry_attempt = -1;   // 0 is first attempt.  -1 if we don't know.
 
   hobject_t hobj;
   spg_t pgid;
@@ -59,8 +60,9 @@ private:
   vector<snapid_t> snaps;
 
   uint64_t features;
-
+  bool bdata_encode;
   osd_reqid_t reqid; // reqid explicitly set by sender
+  dmc::ReqParams qos_params;
 
 public:
   friend class MOSDOpReply;
@@ -79,6 +81,7 @@ public:
   void set_spg(spg_t p) {
     pgid = p;
   }
+  void set_qos_params(const dmc::ReqParams& p) { qos_params = p; }
 
   // Fields decoded in partial decoding
   pg_t get_pg() const {
@@ -113,6 +116,10 @@ public:
 			 header.tid);
     }
   }
+  const dmc::ReqParams& get_qos_params() const {
+    assert(!partial_decode_needed);
+    return qos_params;
+  }
 
   // Fields decoded in final decoding
   int get_client_inc() const {
@@ -130,14 +137,14 @@ public:
     else
       return object_locator_t(hobj);
   }
-  object_t& get_oid() {
+  const object_t& get_oid() const {
     assert(!final_decode_needed);
     return hobj.oid;
   }
   const hobject_t &get_hobj() const {
     return hobj;
   }
-  snapid_t get_snapid() {
+  snapid_t get_snapid() const {
     assert(!final_decode_needed);
     return hobj.snap;
   }
@@ -169,7 +176,8 @@ public:
   MOSDOp()
     : MOSDFastDispatchOp(CEPH_MSG_OSD_OP, HEAD_VERSION, COMPAT_VERSION),
       partial_decode_needed(true),
-      final_decode_needed(true) { }
+      final_decode_needed(true),
+      bdata_encode(false) { }
   MOSDOp(int inc, long tid, const hobject_t& ho, spg_t& _pgid,
 	 epoch_t _osdmap_epoch,
 	 int _flags, uint64_t feat)
@@ -180,7 +188,8 @@ public:
       pgid(_pgid),
       partial_decode_needed(false),
       final_decode_needed(false),
-      features(feat) {
+      features(feat),
+      bdata_encode(false) {
     set_tid(tid);
 
     // also put the client_inc in reqid.inc, so that get_reqid() can
@@ -188,7 +197,7 @@ public:
     reqid.inc = inc;
   }
 private:
-  ~MOSDOp() {}
+  ~MOSDOp() override {}
 
 public:
   void set_mtime(utime_t mt) { mtime = mt; }
@@ -231,14 +240,7 @@ public:
     add_simple_op(CEPH_OSD_OP_STAT, 0, 0);
   }
 
-  bool has_flag(__u32 flag) { return flags & flag; };
-  bool wants_ack() const { return flags & CEPH_OSD_FLAG_ACK; }
-  bool wants_ondisk() const { return flags & CEPH_OSD_FLAG_ONDISK; }
-  bool wants_onnvram() const { return flags & CEPH_OSD_FLAG_ONNVRAM; }
-
-  void set_want_ack(bool b) { flags |= CEPH_OSD_FLAG_ACK; }
-  void set_want_onnvram(bool b) { flags |= CEPH_OSD_FLAG_ONNVRAM; }
-  void set_want_ondisk(bool b) { flags |= CEPH_OSD_FLAG_ONDISK; }
+  bool has_flag(__u32 flag) const { return flags & flag; };
 
   bool is_retry_attempt() const { return flags & CEPH_OSD_FLAG_RETRY; }
   void set_retry_attempt(unsigned a) { 
@@ -250,9 +252,11 @@ public:
   }
 
   // marshalling
-  virtual void encode_payload(uint64_t features) {
-
-    OSDOp::merge_osd_op_vector_in_data(ops, data);
+  void encode_payload(uint64_t features) override {
+    if( false == bdata_encode ) {
+      OSDOp::merge_osd_op_vector_in_data(ops, data);
+      bdata_encode = true;
+    }
 
     if ((features & CEPH_FEATURE_OBJECTLOCATOR) == 0) {
       // here is the old structure we are encoding to: //
@@ -360,14 +364,27 @@ struct ceph_osd_request_head {
       ::encode(retry_attempt, payload);
       ::encode(features, payload);
     } else {
-      // latest v8 encoding with hobject_t hash separate from pgid, no
-      // reassert version
-      header.version = HEAD_VERSION;
+      // v9 encoding for dmclock use, otherwise v8.
+      // v8 encoding with hobject_t hash separate from pgid, no
+      // reassert version.
+      if (HAVE_FEATURE(features, QOS_DMC)) {
+	header.version = HEAD_VERSION;
+      } else {
+	header.version = 8;
+      }
+
       ::encode(pgid, payload);
       ::encode(hobj.get_hash(), payload);
       ::encode(osdmap_epoch, payload);
       ::encode(flags, payload);
       ::encode(reqid, payload);
+      if (header.version >= 9) {
+	::encode(qos_params, payload);
+      }
+      encode_trace(payload, features);
+
+      // -- above decoded up front; below decoded post-dispatch thread --
+
       ::encode(client_inc, payload);
       ::encode(mtime, payload);
       ::encode(get_object_locator(), payload);
@@ -387,12 +404,12 @@ struct ceph_osd_request_head {
     }
   }
 
-  virtual void decode_payload() {
+  void decode_payload() override {
     assert(partial_decode_needed && final_decode_needed);
     p = payload.begin();
 
     // Always keep here the newest version of decoding order/rule
-    if (header.version == HEAD_VERSION) {
+    if (header.version >= 8) {
       ::decode(pgid, p);      // actual pgid
       uint32_t hash;
       ::decode(hash, p); // raw hash value
@@ -400,6 +417,9 @@ struct ceph_osd_request_head {
       ::decode(osdmap_epoch, p);
       ::decode(flags, p);
       ::decode(reqid, p);
+      if (header.version >= 9)
+	::decode(qos_params, p);
+      decode_trace(p);
     } else if (header.version == 7) {
       ::decode(pgid.pgid, p);      // raw pgid
       hobj.set_hash(pgid.pgid.ps());
@@ -475,7 +495,7 @@ struct ceph_osd_request_head {
 	::decode_raw(opgid, p);
 	pgid.pgid = opgid;
       } else {
-	::decode(pgid, p);
+	::decode(pgid.pgid, p);
       }
 
       ::decode(hobj.oid, p);
@@ -560,12 +580,13 @@ struct ceph_osd_request_head {
     return true;
   }
 
-  void clear_buffers() {
-    ops.clear();
+  void clear_buffers() override {
+    OSDOp::clear_data(ops);
+    bdata_encode = false;
   }
 
-  const char *get_type_name() const { return "osd_op"; }
-  void print(ostream& out) const {
+  const char *get_type_name() const override { return "osd_op"; }
+  void print(ostream& out) const override {
     out << "osd_op(";
     if (!partial_decode_needed) {
       out << get_reqid() << ' ';

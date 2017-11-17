@@ -54,7 +54,7 @@ class EventCenter;
 class EventCallback {
 
  public:
-  virtual void do_request(int fd_or_id) = 0;
+  virtual void do_request(uint64_t fd_or_id) = 0;
   virtual ~EventCallback() {}       // we want a virtual destructor!!!
 };
 
@@ -203,7 +203,7 @@ class EventCenter {
   uint64_t create_time_event(uint64_t milliseconds, EventCallbackRef ctxt);
   void delete_file_event(int fd, int mask);
   void delete_time_event(uint64_t id);
-  int process_events(int timeout_microseconds);
+  int process_events(int timeout_microseconds, ceph::timespan *working_dur = nullptr);
   void wakeup();
 
   // Used by external thread
@@ -223,7 +223,7 @@ class EventCenter {
    public:
     C_submit_event(func &&_f, bool nw)
       : f(std::move(_f)), nonwait(nw) {}
-    void do_request(int id) {
+    void do_request(uint64_t id) override {
       f();
       lock.lock();
       cond.notify_all();

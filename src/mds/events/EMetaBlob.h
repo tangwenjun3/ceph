@@ -66,14 +66,14 @@ public:
     typedef compact_map<snapid_t, old_inode_t> old_inodes_t;
     string  dn;         // dentry
     snapid_t dnfirst, dnlast;
-    version_t dnv;
+    version_t dnv{0};
     inode_t inode;      // if it's not
     fragtree_t dirfragtree;
     map<string,bufferptr> xattrs;
     string symlink;
     snapid_t oldest_snap;
     bufferlist snapbl;
-    __u8 state;
+    __u8 state{0};
     old_inodes_t old_inodes;
 
     fullbit(const fullbit& o);
@@ -335,7 +335,10 @@ private:
   // for replay, in certain cases
   //LogSegment *_segment;
 
-  explicit EMetaBlob(MDLog *mdl = 0);  // defined in journal.cc
+  EMetaBlob() : opened_ino(0), renamed_dirino(0),
+                inotablev(0), sessionmapv(0), allocated_ino(0),
+                last_subtree_map(0), event_seq(0)
+                {}
   ~EMetaBlob() { }
 
   void print(ostream& out) {

@@ -53,7 +53,9 @@ class PaxosService {
    */
   bool proposing;
 
- protected:
+  bool need_immediate_propose = false;
+
+protected:
   /**
    * Services implementing us used to depend on the Paxos version, back when
    * each service would have a Paxos instance for itself. However, now we only
@@ -75,14 +77,22 @@ class PaxosService {
    */
   bool have_pending; 
 
+  /**
+   * health checks for this service
+   *
+   * Child must populate this during encode_pending() by calling encode_health().
+   */
+  health_check_map_t health_checks;
 protected:
-
   /**
    * format of our state in leveldb, 0 for default
    */
   version_t format_version;
 
-
+public:
+  const health_check_map_t& get_health_checks() const {
+    return health_checks;
+  }
 
   /**
    * @defgroup PaxosService_h_callbacks Callback classes
@@ -104,7 +114,7 @@ protected:
   public:
     C_RetryMessage(PaxosService *s, MonOpRequestRef op_) :
       C_MonOp(op_), svc(s) { }
-    void _finish(int r) {
+    void _finish(int r) override {
       if (r == -EAGAIN || r >= 0)
 	svc->dispatch(op);
       else if (r == -ECANCELED)
@@ -117,10 +127,7 @@ protected:
   /**
    * @}
    */
-  friend class C_Propose;
-  
 
-public:
   /**
    * @param mn A Monitor instance
    * @param p A Paxos instance
@@ -145,12 +152,12 @@ public:
    *
    * @returns The service's name.
    */
-  string get_service_name() { return service_name; }
+  const string& get_service_name() const { return service_name; }
 
   /**
    * Get the store prefixes we utilize
    */
-  virtual void get_store_prefixes(set<string>& s) {
+  virtual void get_store_prefixes(set<string>& s) const {
     s.insert(service_name);
   }
   
@@ -189,7 +196,7 @@ private:
    * @remarks We only create a pending state we our Monitor is the Leader.
    *
    * @pre Paxos is active
-   * @post have_pending is true iif our Monitor is the Leader and Paxos is
+   * @post have_pending is true if our Monitor is the Leader and Paxos is
    *	   active
    */
   void _active();
@@ -359,6 +366,15 @@ public:
   virtual bool should_propose(double &delay);
 
   /**
+   * force an immediate propose.
+   *
+   * This is meant to be called from prepare_update(op).
+   */
+  void force_immediate_propose() {
+    need_immediate_propose = true;
+  }
+
+  /**
    * @defgroup PaxosService_h_courtesy Courtesy functions
    *
    * Courtesy functions, in case the class implementing this service has
@@ -409,15 +425,14 @@ public:
    */
   virtual void tick() {}
 
-  /**
-   * Get health information
-   *
-   * @param summary list of summary strings and associated severity
-   * @param detail optional list of detailed problem reports; may be NULL
-   */
-  virtual void get_health(list<pair<health_status_t,string> >& summary,
-			  list<pair<health_status_t,string> > *detail,
-			  CephContext *cct) const { }
+  void encode_health(const health_check_map_t& next,
+		     MonitorDBStore::TransactionRef t) {
+    bufferlist bl;
+    ::encode(next, bl);
+    t->put("health", service_name, bl);
+    mon->log_health(next, health_checks, t);
+  }
+  void load_health();
 
  private:
   /**
@@ -466,7 +481,7 @@ public:
    *
    * @returns true if we are proposing; false otherwise.
    */
-  bool is_proposing() {
+  bool is_proposing() const {
     return proposing;
   }
 
@@ -477,7 +492,7 @@ public:
    *
    * @returns true if in state ACTIVE; false otherwise.
    */
-  bool is_active() {
+  bool is_active() const {
     return
       !is_proposing() &&
       (paxos->is_active() || paxos->is_updating() || paxos->is_writing());
@@ -495,7 +510,7 @@ public:
    * @param ver The version we want to check if is readable
    * @returns true if it is readable; false otherwise
    */
-  bool is_readable(version_t ver = 0) {
+  bool is_readable(version_t ver = 0) const {
     if (ver > get_last_committed() ||
 	!paxos->is_readable(0) ||
 	get_last_committed() == 0)
@@ -514,11 +529,8 @@ public:
    *
    * @returns true if writeable; false otherwise
    */
-  bool is_writeable() {
-    return
-      !is_proposing() &&
-      is_write_ready() &&
-      (paxos->is_active() || paxos->is_updating() || paxos->is_writing());
+  bool is_writeable() const {
+    return is_write_ready(); 
   }
 
   /**
@@ -527,7 +539,7 @@ public:
    *
    * @returns true if we are ready to be written to; false otherwise.
    */
-  bool is_write_ready() {
+  bool is_write_ready() const {
     return is_active() && have_pending;
   }
 
@@ -662,7 +674,7 @@ public:
    * @returns the version we should trim to; if we return zero, it should be
    *	      assumed that there's no version to trim to.
    */
-  virtual version_t get_trim_to() {
+  virtual version_t get_trim_to() const {
     return 0;
   }
 
@@ -777,6 +789,18 @@ public:
   void put_value(MonitorDBStore::TransactionRef t,
 		 const string& key, bufferlist& bl) {
     t->put(get_service_name(), key, bl);
+  }
+
+  /**
+   * Put integer value @v into the key @p key.
+   *
+   * @param t A transaction to which we will add this put operation
+   * @param key The key to which we will add the value
+   * @param v An integer
+   */
+  void put_value(MonitorDBStore::TransactionRef t,
+		 const string& key, version_t v) {
+    t->put(get_service_name(), key, v);
   }
 
   /**

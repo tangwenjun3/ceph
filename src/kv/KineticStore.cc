@@ -45,6 +45,22 @@ int KineticStore::_test_init(CephContext *c)
   return status.ok() ? 0 : -EIO;
 }
 
+int KineticStore::open(ostream &out, const vector<ColumnFamily>& cfs)
+{
+  if (!cfs.empty()) {
+    assert(0 == "Not implemented");
+  }
+  return do_open(out, false);
+}
+
+int KineticStore::create_and_open(ostream &out, const vector<ColumnFamily>& cfs)
+{
+  if (!cfs.empty()) {
+    assert(0 == "Not implemented");
+  }
+  return do_open(out, true);
+}
+
 int KineticStore::do_open(ostream &out, bool create_if_missing)
 {
   kinetic::KineticConnectionFactory conn_factory =
@@ -163,6 +179,20 @@ void KineticStore::KineticTransactionImpl::rmkeys_by_prefix(const string &prefix
     string key = combine_strings(prefix, it->key());
     ops.push_back(KineticOp(KINETIC_OP_DELETE, key));
     dout(30) << "kinetic rm key by prefix: " << key << dendl;
+  }
+}
+
+void KineticStore::KineticTransactionImpl::rm_range_keys(const string &prefix, const string &start, const string &end)
+{
+  KeyValueDB::Iterator it = db->get_iterator(prefix);
+  it->lower_bound(start);
+  while (it->valid()) {
+    if (it->key() >= end) {
+      break;
+    }
+    ops.push_back(
+        KineticOp(KINETIC_OP_DELETE, combine_strings(prefix, it->key())));
+    it->next();
   }
 }
 

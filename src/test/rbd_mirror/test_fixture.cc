@@ -31,8 +31,16 @@ void TestFixture::SetUpTestCase() {
   _local_pool_name = get_temp_pool_name("test-rbd-mirror-");
   ASSERT_EQ(0, _rados->pool_create(_local_pool_name.c_str()));
 
+  librados::IoCtx local_ioctx;
+  ASSERT_EQ(0, _rados->ioctx_create(_local_pool_name.c_str(), local_ioctx));
+  local_ioctx.application_enable("rbd", true);
+
   _remote_pool_name = get_temp_pool_name("test-rbd-mirror-");
   ASSERT_EQ(0, _rados->pool_create(_remote_pool_name.c_str()));
+
+  librados::IoCtx remote_ioctx;
+  ASSERT_EQ(0, _rados->ioctx_create(_remote_pool_name.c_str(), remote_ioctx));
+  remote_ioctx.application_enable("rbd", true);
 
   ASSERT_EQ(0, create_image_data_pool(_data_pool));
   if (!_data_pool.empty()) {
@@ -63,7 +71,7 @@ void TestFixture::SetUp() {
   ASSERT_EQ(0, _rados->ioctx_create(_remote_pool_name.c_str(), m_remote_io_ctx));
   m_image_name = get_temp_image_name();
 
-  m_threads = new rbd::mirror::Threads(reinterpret_cast<CephContext*>(
+  m_threads = new rbd::mirror::Threads<>(reinterpret_cast<CephContext*>(
     m_local_io_ctx.cct()));
 }
 
@@ -95,8 +103,8 @@ int TestFixture::open_image(librados::IoCtx &io_ctx,
 
 int TestFixture::create_snap(librbd::ImageCtx *image_ctx, const char* snap_name,
                              librados::snap_t *snap_id) {
-  int r = image_ctx->operations->snap_create(snap_name,
-					     cls::rbd::UserSnapshotNamespace());
+  int r = image_ctx->operations->snap_create(cls::rbd::UserSnapshotNamespace(),
+					     snap_name);
   if (r < 0) {
     return r;
   }
@@ -106,12 +114,14 @@ int TestFixture::create_snap(librbd::ImageCtx *image_ctx, const char* snap_name,
     return r;
   }
 
-  if (image_ctx->snap_ids.count(snap_name) == 0) {
+  if (image_ctx->snap_ids.count({cls::rbd::UserSnapshotNamespace(),
+				 snap_name}) == 0) {
     return -ENOENT;
   }
 
   if (snap_id != nullptr) {
-    *snap_id = image_ctx->snap_ids[snap_name];
+    *snap_id = image_ctx->snap_ids[{cls::rbd::UserSnapshotNamespace(),
+				    snap_name}];
   }
   return 0;
 }
@@ -131,12 +141,19 @@ int TestFixture::create_image_data_pool(std::string &data_pool) {
   }
 
   r = _rados->pool_create(pool.c_str());
-  if (r == 0) {
-    data_pool = pool;
-    return 0;
+  if (r < 0) {
+    return r;
   }
 
-  return r;
+  librados::IoCtx data_ioctx;
+  r = _rados->ioctx_create(pool.c_str(), data_ioctx);
+  if (r < 0) {
+    return r;
+  }
+
+  data_ioctx.application_enable("rbd", true);
+  data_pool = pool;
+  return 0;
 }
 
 } // namespace mirror

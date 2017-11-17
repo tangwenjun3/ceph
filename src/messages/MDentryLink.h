@@ -20,13 +20,13 @@ class MDentryLink : public Message {
   dirfrag_t subtree;
   dirfrag_t dirfrag;
   string dn;
-  bool is_primary;
+  bool is_primary = false;
 
  public:
-  dirfrag_t get_subtree() { return subtree; }
-  dirfrag_t get_dirfrag() { return dirfrag; }
-  string& get_dn() { return dn; }
-  bool get_is_primary() { return is_primary; }
+  dirfrag_t get_subtree() const { return subtree; }
+  dirfrag_t get_dirfrag() const { return dirfrag; }
+  const string& get_dn() const { return dn; }
+  bool get_is_primary() const { return is_primary; }
 
   bufferlist bl;
 
@@ -39,15 +39,15 @@ class MDentryLink : public Message {
     dn(n),
     is_primary(p) {}
 private:
-  ~MDentryLink() {}
+  ~MDentryLink() override {}
 
 public:
-  const char *get_type_name() const { return "dentry_link";}
-  void print(ostream& o) const {
+  const char *get_type_name() const override { return "dentry_link";}
+  void print(ostream& o) const override {
     o << "dentry_link(" << dirfrag << " " << dn << ")";
   }
   
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(subtree, p);
     ::decode(dirfrag, p);
@@ -55,7 +55,7 @@ public:
     ::decode(is_primary, p);
     ::decode(bl, p);
   }
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(subtree, payload);
     ::encode(dirfrag, payload);
     ::encode(dn, payload);

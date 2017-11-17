@@ -12,7 +12,9 @@ add_subdirectory(cls_hello)
 add_subdirectory(cls_lock)
 add_subdirectory(cls_log)
 add_subdirectory(cls_numops)
+add_subdirectory(cls_sdk)
 if(WITH_RBD)
+  add_subdirectory(cls_journal)
   add_subdirectory(cls_rbd)
 endif(WITH_RBD)
 add_subdirectory(cls_refcount)
@@ -24,6 +26,7 @@ add_subdirectory(cls_lua)
 add_subdirectory(common)
 add_subdirectory(compressor)
 add_subdirectory(crush)
+add_subdirectory(direct_messenger)
 add_subdirectory(encoding)
 add_subdirectory(erasure-code)
 add_subdirectory(filestore)
@@ -42,6 +45,7 @@ endif(WITH_RBD)
 add_subdirectory(messenger)
 add_subdirectory(mds)
 add_subdirectory(mon)
+add_subdirectory(mgr)
 add_subdirectory(msgr)
 add_subdirectory(ObjectMap)
 add_subdirectory(objectstore)
@@ -144,7 +148,7 @@ add_executable(ceph_omapbench
   )
 target_link_libraries(ceph_omapbench
   librados
-  ${Boost_PROGRAM_OPTIONS_LIBRARY}
+  Boost::program_options
   global
   ${BLKID_LIBRARIES}
   ${CMAKE_DL_LIBS}
@@ -198,7 +202,7 @@ if(${WITH_RADOSGW})
     cls_rgw_client
     cls_user_client
     cls_lock_client
-    ${Boost_REGEX_LIBRARY}
+    Boost::regex
     ${BLKID_LIBRARIES}
     ${CURL_LIBRARIES}
     ${EXPAT_LIBRARIES}
@@ -228,7 +232,7 @@ if(${WITH_RADOSGW})
     cls_rgw_client
     cls_user_client
     cls_lock_client
-    ${Boost_REGEX_LIBRARY}
+    Boost::regex
     ${BLKID_LIBRARIES}
     ${CURL_LIBRARIES}
     ${EXPAT_LIBRARIES}
@@ -274,7 +278,9 @@ add_executable(ceph_test_librgw_file
   )
 set_target_properties(ceph_test_librgw_file PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
-target_include_directories(ceph_test_librgw_file PRIVATE ${FCGI_INCLUDE_DIR})
+if(WITH_RADOSGW_FCGI_FRONTEND)
+target_include_directories(ceph_test_librgw_file SYSTEM PRIVATE ${FCGI_INCLUDE_DIR})
+endif(WITH_RADOSGW_FCGI_FRONTEND)
 target_link_libraries(ceph_test_librgw_file
   rgw
   librados
@@ -317,7 +323,9 @@ add_executable(ceph_test_librgw_file_nfsns
   )
 set_target_properties(ceph_test_librgw_file_nfsns PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
-target_include_directories(ceph_test_librgw_file_nfsns PRIVATE ${FCGI_INCLUDE_DIR})
+if(WITH_RADOSGW_FCGI_FRONTEND)
+target_include_directories(ceph_test_librgw_file_nfsns SYSTEM PRIVATE ${FCGI_INCLUDE_DIR})
+endif(WITH_RADOSGW_FCGI_FRONTEND)
 target_link_libraries(ceph_test_librgw_file_nfsns
   rgw
   librados
@@ -333,6 +341,20 @@ add_executable(ceph_test_librgw_file_aw
 set_target_properties(ceph_test_librgw_file_aw PROPERTIES COMPILE_FLAGS
   ${UNITTEST_CXX_FLAGS})
 target_link_libraries(ceph_test_librgw_file_aw
+  rgw
+  librados
+  ceph-common
+  ${UNITTEST_LIBS}
+  ${EXTRALIBS}
+  )
+
+# ceph_test_librgw_file_marker (READDIR with string and uint64 offsets)
+add_executable(ceph_test_librgw_file_marker
+  librgw_file_marker.cc
+  )
+set_target_properties(ceph_test_librgw_file_marker PROPERTIES COMPILE_FLAGS
+  ${UNITTEST_CXX_FLAGS})
+target_link_libraries(ceph_test_librgw_file_marker
   rgw
   librados
   ceph-common
@@ -497,11 +519,27 @@ if(HAVE_BLKID)
     )
 endif(HAVE_BLKID)
 
+# ceph_test_admin_socket_output
+
+add_executable(ceph_test_admin_socket_output
+  test_admin_socket_output.cc
+  admin_socket_output.cc
+  admin_socket_output_tests.cc
+  )
+target_link_libraries(ceph_test_admin_socket_output
+  ceph-common
+  ${Boost_FILESYSTEM_LIBRARY}
+  )
+install(TARGETS
+  ceph_test_admin_socket_output
+  DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 #make check starts here
 
 #following dependencies are run inside make check unit tests
 add_dependencies(tests
   ceph-mon
+  ceph-mgr
   ceph
   ceph-authtool
   get_command_descriptions
@@ -513,6 +551,7 @@ add_dependencies(tests
   ceph-osd
   ceph-dencoder
   ceph-objectstore-tool
+  ceph-kvstore-tool
   ceph-monstore-tool
   osdmaptool
   ceph_example
@@ -525,6 +564,9 @@ add_dependencies(tests
   cython_modules)
 if(WITH_RBD)
   add_dependencies(tests unittest_librbd rbd)
+  if(FREEBSD)
+    add_dependencies(tests rbd-ggate)
+  endif(FREEBSD)
 endif(WITH_RBD)
 if(WITH_RADOSGW)
   add_dependencies(tests radosgw-admin)
@@ -533,23 +575,20 @@ if(NOT FREEBSD)
   add_dependencies(tests ceph-detect-init)
 endif(NOT FREEBSD)
 
-add_ceph_test(test-ceph-helpers.sh ${CMAKE_CURRENT_SOURCE_DIR}/test-ceph-helpers.sh)
-add_ceph_test(erasure-decode-non-regression.sh ${CMAKE_SOURCE_DIR}/qa/workunits/erasure-code/encode-decode-non-regression.sh)
-
-add_ceph_test(ceph_objectstore_tool.py ${CMAKE_CURRENT_SOURCE_DIR}/ceph_objectstore_tool.py)
-if(WITH_LIBCEPHFS)
-  add_ceph_test(cephtool-test-mds.sh ${CMAKE_CURRENT_SOURCE_DIR}/cephtool-test-mds.sh)
-endif(WITH_LIBCEPHFS)
-add_ceph_test(cephtool-test-mon.sh ${CMAKE_CURRENT_SOURCE_DIR}/cephtool-test-mon.sh)
-add_ceph_test(cephtool-test-osd.sh ${CMAKE_CURRENT_SOURCE_DIR}/cephtool-test-osd.sh)
-add_ceph_test(cephtool-test-rados.sh ${CMAKE_CURRENT_SOURCE_DIR}/cephtool-test-rados.sh)
 if(WITH_RBD)
   add_ceph_test(run-rbd-unit-tests.sh ${CMAKE_CURRENT_SOURCE_DIR}/run-rbd-unit-tests.sh)
+  if(FREEBSD)
+    add_ceph_test(rbd-ggate.sh ${CMAKE_CURRENT_SOURCE_DIR}/rbd-ggate.sh)
+  endif(FREEBSD)
 endif(WITH_RBD)
 add_ceph_test(run-cli-tests ${CMAKE_CURRENT_SOURCE_DIR}/run-cli-tests)
 add_ceph_test(test_objectstore_memstore.sh ${CMAKE_CURRENT_SOURCE_DIR}/test_objectstore_memstore.sh)
-add_ceph_test(test_pidfile.sh ${CMAKE_CURRENT_SOURCE_DIR}/test_pidfile.sh)
+
+# flaky
+#add_ceph_test(test_pidfile.sh ${CMAKE_CURRENT_SOURCE_DIR}/test_pidfile.sh)
+
 add_ceph_test(test_subman.sh ${CMAKE_CURRENT_SOURCE_DIR}/test_subman.sh)
+add_ceph_test(smoke.sh ${CMAKE_CURRENT_SOURCE_DIR}/smoke.sh)
 add_ceph_test(unittest_bufferlist.sh ${CMAKE_SOURCE_DIR}/src/unittest_bufferlist.sh)
 
 add_test(NAME run-tox-ceph-disk COMMAND bash ${CMAKE_SOURCE_DIR}/src/ceph-disk/run-tox.sh)
@@ -579,79 +618,79 @@ add_executable(unittest_admin_socket
   admin_socket.cc
   $<TARGET_OBJECTS:unit-main>
   )
-add_ceph_unittest(unittest_admin_socket ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_admin_socket)
+add_ceph_unittest(unittest_admin_socket)
 target_link_libraries(unittest_admin_socket global) 
 
 # unittest_encoding
 add_executable(unittest_encoding
   encoding.cc
   )
-add_ceph_unittest(unittest_encoding ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_encoding)
-target_link_libraries(unittest_encoding ceph-common librados ${XIO_LIBRARY} pthread rt m ${BLKID_LIBRARIES})
+add_ceph_unittest(unittest_encoding)
+target_link_libraries(unittest_encoding ceph-common)
 
 # unittest_addrs
 add_executable(unittest_addrs
   test_addrs.cc
   )
-add_ceph_unittest(unittest_addrs ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_addrs)
-target_link_libraries(unittest_addrs ceph-common librados ${XIO_LIBRARY} pthread rt m ${BLKID_LIBRARIES})
+add_ceph_unittest(unittest_addrs)
+target_link_libraries(unittest_addrs ceph-common)
 
 # unittest_workqueue
 add_executable(unittest_workqueue
   test_workqueue.cc
   $<TARGET_OBJECTS:unit-main>
   )
-add_ceph_unittest(unittest_workqueue ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_workqueue)
-target_link_libraries(unittest_workqueue global ${BLKID_LIBRARIES})
+add_ceph_unittest(unittest_workqueue)
+target_link_libraries(unittest_workqueue global)
 
 # unittest_striper
 add_executable(unittest_striper
   test_striper.cc
   $<TARGET_OBJECTS:unit-main>
   )
-add_ceph_unittest(unittest_striper ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_striper)
+add_ceph_unittest(unittest_striper)
 target_link_libraries(unittest_striper global ${BLKID_LIBRARIES})
 
 # unittest_prebufferedstreambuf
 add_executable(unittest_prebufferedstreambuf
   test_prebufferedstreambuf.cc
   )
-add_ceph_unittest(unittest_prebufferedstreambuf ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_prebufferedstreambuf)
-target_link_libraries(unittest_prebufferedstreambuf global ${BLKID_LIBRARIES})
+add_ceph_unittest(unittest_prebufferedstreambuf)
+target_link_libraries(unittest_prebufferedstreambuf global)
 
 # unittest_str_list
 add_executable(unittest_str_list
   test_str_list.cc
   )
-add_ceph_unittest(unittest_str_list ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_str_list)
-target_link_libraries(unittest_str_list global ${BLKID_LIBRARIES})
+add_ceph_unittest(unittest_str_list)
+target_link_libraries(unittest_str_list global)
 
 # unittest_log
 add_executable(unittest_log
   ${CMAKE_SOURCE_DIR}/src/log/test.cc
   )
-add_ceph_unittest(unittest_log ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_log)
+add_ceph_unittest(unittest_log)
 target_link_libraries(unittest_log global)
 
 # unittest_base64
 add_executable(unittest_base64
   base64.cc
   )
-add_ceph_unittest(unittest_base64 ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_base64)
+add_ceph_unittest(unittest_base64)
 target_link_libraries(unittest_base64 global) 
 
 # unittest_ceph_argparse
 add_executable(unittest_ceph_argparse
   ceph_argparse.cc
   )
-add_ceph_unittest(unittest_ceph_argparse ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_ceph_argparse)
+add_ceph_unittest(unittest_ceph_argparse)
 target_link_libraries(unittest_ceph_argparse global)
 
 # unittest_ceph_compatset
 add_executable(unittest_ceph_compatset
   ceph_compatset.cc
   )
-add_ceph_unittest(unittest_ceph_compatset ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_ceph_compatset)
+add_ceph_unittest(unittest_ceph_compatset)
 target_link_libraries(unittest_ceph_compatset global)
 
 # unittest_gather
@@ -659,14 +698,14 @@ add_executable(unittest_gather
   gather.cc
   $<TARGET_OBJECTS:unit-main>
   )
-add_ceph_unittest(unittest_gather ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_gather)
+add_ceph_unittest(unittest_gather)
 target_link_libraries(unittest_gather global)
 
 # unittest_run_cmd
 add_executable(unittest_run_cmd
   run_cmd.cc
   )
-add_ceph_unittest(unittest_run_cmd ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_run_cmd)
+add_ceph_unittest(unittest_run_cmd)
 target_link_libraries(unittest_run_cmd global)
 
 # signals
@@ -674,114 +713,121 @@ add_executable(unittest_signals
   signals.cc
   $<TARGET_OBJECTS:unit-main>
   )
-add_ceph_unittest(unittest_signals ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_signals)
+add_ceph_unittest(unittest_signals)
 target_link_libraries(unittest_signals global)
 
 # unittest_simple_spin
 add_executable(unittest_simple_spin
   simple_spin.cc
   )
-add_ceph_unittest(unittest_simple_spin ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_simple_spin)
+add_ceph_unittest(unittest_simple_spin)
 target_link_libraries(unittest_simple_spin global)
 
 # unittest_bufferlist
 add_executable(unittest_bufferlist
   bufferlist.cc
   )
-add_ceph_unittest(unittest_bufferlist ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_bufferlist)
+add_ceph_unittest(unittest_bufferlist)
 target_link_libraries(unittest_bufferlist global)
 
 # unittest_xlist
 add_executable(unittest_xlist
   test_xlist.cc
   )
-add_ceph_unittest(unittest_xlist ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_xlist)
-target_link_libraries(unittest_xlist ceph-common ${XIO_LIBRARY})
+add_ceph_unittest(unittest_xlist)
+target_link_libraries(unittest_xlist ceph-common)
 
 # unittest_arch
 add_executable(unittest_arch
   test_arch.cc
   $<TARGET_OBJECTS:unit-main>
   )
-add_ceph_unittest(unittest_arch ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_arch)
+add_ceph_unittest(unittest_arch)
 target_link_libraries(unittest_arch global)
 
 # unittest_denc
 add_executable(unittest_denc
   test_denc.cc
   )
-add_ceph_unittest(unittest_denc ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_denc)
+add_ceph_unittest(unittest_denc)
 target_link_libraries(unittest_denc os global)
 
 # unittest_mempool
 add_executable(unittest_mempool
   test_mempool.cc
   )
-add_ceph_unittest(unittest_mempool ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_mempool)
+add_ceph_unittest(unittest_mempool)
 target_link_libraries(unittest_mempool global)
+
+# unittest_features
+add_executable(unittest_features
+  test_features.cc
+  )
+add_ceph_unittest(unittest_features)
+target_link_libraries(unittest_features global)
 
 # unittest_crypto
 add_executable(unittest_crypto
   crypto.cc
   $<TARGET_OBJECTS:unit-main>
   )
-add_ceph_unittest(unittest_crypto ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_crypto)
+add_ceph_unittest(unittest_crypto)
 target_link_libraries(unittest_crypto global)
 
 # unittest_crypto_init
 add_executable(unittest_crypto_init
   crypto_init.cc
   )
-add_ceph_unittest(unittest_crypto_init ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_crypto_init)
+add_ceph_unittest(unittest_crypto_init)
 target_link_libraries(unittest_crypto_init global)
 
 # unittest_perf_counters
 add_executable(unittest_perf_counters
   perf_counters.cc
   )
-add_ceph_unittest(unittest_perf_counters ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_perf_counters)
+add_ceph_unittest(unittest_perf_counters)
 target_link_libraries(unittest_perf_counters global)
 
 # unittest_ceph_crypto
 add_executable(unittest_ceph_crypto
   ceph_crypto.cc
   )
-add_ceph_unittest(unittest_ceph_crypto ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_ceph_crypto)
+add_ceph_unittest(unittest_ceph_crypto)
 target_link_libraries(unittest_ceph_crypto global)
 
 # unittest_utf8
 add_executable(unittest_utf8
   utf8.cc
   )
-add_ceph_unittest(unittest_utf8 ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_utf8)
+add_ceph_unittest(unittest_utf8)
 target_link_libraries(unittest_utf8 global)
 
 # unittest_mime
 add_executable(unittest_mime
   mime.cc
   )
-add_ceph_unittest(unittest_mime ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_mime)
+add_ceph_unittest(unittest_mime)
 target_link_libraries(unittest_mime global)
 
 # unittest_escape
 add_executable(unittest_escape
   escape.cc
   )
-add_ceph_unittest(unittest_escape ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_escape)
+add_ceph_unittest(unittest_escape)
 target_link_libraries(unittest_escape global)
 
 # unittest_strtol
 add_executable(unittest_strtol
   strtol.cc
   )
-add_ceph_unittest(unittest_strtol ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_strtol)
+add_ceph_unittest(unittest_strtol)
 target_link_libraries(unittest_strtol global)
 
 # unittest_confutils
 add_executable(unittest_confutils
   confutils.cc
   )
-add_ceph_unittest(unittest_confutils ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_confutils)
+add_ceph_unittest(unittest_confutils)
 target_link_libraries(unittest_confutils global)
 
 # unittest_heartbeatmap
@@ -789,7 +835,7 @@ add_executable(unittest_heartbeatmap
   heartbeat_map.cc
   $<TARGET_OBJECTS:unit-main>
   )
-add_ceph_unittest(unittest_heartbeatmap ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_heartbeatmap)
+add_ceph_unittest(unittest_heartbeatmap)
 target_link_libraries(unittest_heartbeatmap global ceph-common)
 
 if(${WITH_RADOSGW})
@@ -798,7 +844,7 @@ if(${WITH_RADOSGW})
     formatter.cc
     $<TARGET_OBJECTS:unit-main>
     )
-  add_ceph_unittest(unittest_formatter ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_formatter)
+  add_ceph_unittest(unittest_formatter)
   target_link_libraries(unittest_formatter global)
 endif(${WITH_RADOSGW})
 
@@ -807,7 +853,7 @@ add_executable(unittest_daemon_config
   daemon_config.cc
   $<TARGET_OBJECTS:unit-main>
   )
-add_ceph_unittest(unittest_daemon_config ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_daemon_config)
+add_ceph_unittest(unittest_daemon_config)
 target_link_libraries(unittest_daemon_config
   ceph-common
   global
@@ -820,7 +866,7 @@ if(WITH_LIBCEPHFS)
 add_executable(unittest_libcephfs_config
   libcephfs_config.cc
   )
-add_ceph_unittest(unittest_libcephfs_config ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_libcephfs_config)
+add_ceph_unittest(unittest_libcephfs_config)
 target_link_libraries(unittest_libcephfs_config cephfs)
 endif(WITH_LIBCEPHFS)
 
@@ -828,7 +874,7 @@ if(WITH_RBD)
 # unittest_rbd_replay
 add_executable(unittest_rbd_replay
   test_rbd_replay.cc)
-add_ceph_unittest(unittest_rbd_replay ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_rbd_replay)
+add_ceph_unittest(unittest_rbd_replay)
 target_link_libraries(unittest_rbd_replay
   librbd
   librados
@@ -842,7 +888,7 @@ endif(WITH_RBD)
 # unittest_ipaddr
 add_executable(unittest_ipaddr
   test_ipaddr.cc)  
-add_ceph_unittest(unittest_ipaddr ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_ipaddr)
+add_ceph_unittest(unittest_ipaddr)
 target_link_libraries(unittest_ipaddr mon global)
 
 # unittest_texttable
@@ -850,26 +896,26 @@ add_executable(unittest_texttable
   test_texttable.cc
   $<TARGET_OBJECTS:common_texttable_obj>
   )
-add_ceph_unittest(unittest_texttable ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_texttable)
+add_ceph_unittest(unittest_texttable)
 target_link_libraries(unittest_texttable mon global)
 
 # unittest_on_exit
 add_executable(unittest_on_exit
   on_exit.cc
   )
-add_ceph_unittest(unittest_on_exit ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_on_exit)
+add_ceph_unittest(unittest_on_exit)
 target_link_libraries(unittest_on_exit global)
 
 # unittest_subprocess
 add_executable(unittest_subprocess
   test_subprocess.cc
   )
-add_ceph_unittest(unittest_subprocess ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_subprocess)
+add_ceph_unittest(unittest_subprocess)
 target_link_libraries(unittest_subprocess global)
 
 # unittest_pageset
 add_executable(unittest_pageset test_pageset.cc)
-add_ceph_unittest(unittest_pageset ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/unittest_pageset)
+add_ceph_unittest(unittest_pageset)
 target_link_libraries(unittest_pageset global)
 
 #make check ends here

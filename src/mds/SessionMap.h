@@ -148,7 +148,7 @@ public:
   interval_set<inodeno_t> pending_prealloc_inos; // journaling prealloc, will be added to prealloc_inos
 
   void notify_cap_release(size_t n_caps);
-  void notify_recall_sent(int const new_limit);
+  void notify_recall_sent(const size_t new_limit);
   void clear_recalled_at();
 
   inodeno_t next_ino() const {
@@ -329,7 +329,7 @@ public:
     completed_requests_dirty(false),
     num_trim_flushes_warnings(0),
     num_trim_requests_warnings(0) { }
-  ~Session() {
+  ~Session() override {
     assert(!item_session_list.is_on_list());
     while (!preopen_out_queue.empty()) {
       preopen_out_queue.front()->put();
@@ -450,7 +450,7 @@ public:
                        loaded_legacy(false)
   { }
 
-  ~SessionMap()
+  ~SessionMap() override
   {
     for (auto p : by_state)
       delete p.second;
@@ -490,7 +490,7 @@ public:
   }
 
   // sessions
-  void decode_legacy(bufferlist::iterator& blp);
+  void decode_legacy(bufferlist::iterator& blp) override;
   bool empty() const { return session_map.empty(); }
   const ceph::unordered_map<entity_name_t, Session*> &get_sessions() const
   {
@@ -604,7 +604,8 @@ public:
       int values_r,
       bool first,
       bufferlist &header_bl,
-      std::map<std::string, bufferlist> &session_vals);
+      std::map<std::string, bufferlist> &session_vals,
+      bool more_session_vals);
 
   void load_legacy();
   void _load_legacy_finish(int r, bufferlist &bl);
@@ -664,6 +665,8 @@ public:
   void save_if_dirty(const std::set<entity_name_t> &tgt_sessions,
                      MDSGatherBuilder *gather_bld);
 };
+
+std::ostream& operator<<(std::ostream &out, const Session &s);
 
 
 #endif

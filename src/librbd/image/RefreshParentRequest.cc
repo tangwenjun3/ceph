@@ -24,7 +24,7 @@ using util::create_context_callback;
 
 template <typename I>
 RefreshParentRequest<I>::RefreshParentRequest(I &child_image_ctx,
-                                              const parent_info &parent_md,
+                                              const ParentInfo &parent_md,
                                               Context *on_finish)
   : m_child_image_ctx(child_image_ctx), m_parent_md(parent_md),
     m_on_finish(on_finish), m_parent_image_ctx(nullptr),
@@ -33,7 +33,7 @@ RefreshParentRequest<I>::RefreshParentRequest(I &child_image_ctx,
 
 template <typename I>
 bool RefreshParentRequest<I>::is_refresh_required(I &child_image_ctx,
-                                                  const parent_info &parent_md) {
+                                                  const ParentInfo &parent_md) {
   assert(child_image_ctx.snap_lock.is_locked());
   assert(child_image_ctx.parent_lock.is_locked());
   return (is_open_required(child_image_ctx, parent_md) ||
@@ -42,14 +42,14 @@ bool RefreshParentRequest<I>::is_refresh_required(I &child_image_ctx,
 
 template <typename I>
 bool RefreshParentRequest<I>::is_close_required(I &child_image_ctx,
-                                                const parent_info &parent_md) {
+                                                const ParentInfo &parent_md) {
   return (child_image_ctx.parent != nullptr &&
           (parent_md.spec.pool_id == -1 || parent_md.overlap == 0));
 }
 
 template <typename I>
 bool RefreshParentRequest<I>::is_open_required(I &child_image_ctx,
-                                               const parent_info &parent_md) {
+                                               const ParentInfo &parent_md) {
   return (parent_md.spec.pool_id > -1 && parent_md.overlap > 0 &&
           (child_image_ctx.parent == nullptr ||
            child_image_ctx.parent->md_ctx.get_id() != parent_md.spec.pool_id ||
@@ -69,12 +69,13 @@ void RefreshParentRequest<I>::send() {
 
 template <typename I>
 void RefreshParentRequest<I>::apply() {
+  assert(m_child_image_ctx.cache_lock.is_locked());
+  assert(m_child_image_ctx.snap_lock.is_wlocked());
+  assert(m_child_image_ctx.parent_lock.is_wlocked());
   if (m_child_image_ctx.parent != nullptr) {
     // closing parent image
     m_child_image_ctx.clear_nonexistence_cache();
   }
-  assert(m_child_image_ctx.snap_lock.is_wlocked());
-  assert(m_child_image_ctx.parent_lock.is_wlocked());
   std::swap(m_child_image_ctx.parent, m_parent_image_ctx);
 }
 
@@ -108,6 +109,7 @@ void RefreshParentRequest<I>::send_open_parent() {
   // reset the snap_name and snap_exists fields after we read the header
   m_parent_image_ctx = new I("", m_parent_md.spec.image_id, NULL, parent_io_ctx,
                              true);
+  m_parent_image_ctx->child = &m_child_image_ctx;
 
   // set rados flags for reading the parent image
   if (m_child_image_ctx.balance_parent_reads) {
@@ -152,24 +154,25 @@ void RefreshParentRequest<I>::send_set_parent_snap() {
   CephContext *cct = m_child_image_ctx.cct;
   ldout(cct, 10) << this << " " << __func__ << dendl;
 
-  int r;
+  cls::rbd::SnapshotNamespace snap_namespace;
   std::string snap_name;
   {
     RWLock::RLocker snap_locker(m_parent_image_ctx->snap_lock);
-    r = m_parent_image_ctx->get_snap_name(m_parent_md.spec.snap_id, &snap_name);
-  }
-
-  if (r < 0) {
-    lderr(cct) << "failed to located snapshot: " << cpp_strerror(r) << dendl;
-    send_complete(r);
-    return;
+    const SnapInfo *info = m_parent_image_ctx->get_snap_info(m_parent_md.spec.snap_id);
+    if (!info) {
+      lderr(cct) << "failed to locate snapshot: Snapshot with this id not found" << dendl;
+      send_complete(-ENOENT);
+      return;
+    }
+    snap_namespace = info->snap_namespace;
+    snap_name = info->name;
   }
 
   using klass = RefreshParentRequest<I>;
   Context *ctx = create_context_callback<
     klass, &klass::handle_set_parent_snap, false>(this);
   SetSnapRequest<I> *req = SetSnapRequest<I>::create(
-    *m_parent_image_ctx, snap_name, ctx);
+    *m_parent_image_ctx, snap_namespace, snap_name, ctx);
   req->send();
 }
 

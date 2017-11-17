@@ -4,39 +4,26 @@
 #define RGW_ASIO_CLIENT_H
 
 #include <boost/asio/ip/tcp.hpp>
-#include <beast/http/body_type.hpp>
-#include <beast/http/concepts.hpp>
-#include <beast/http/message_v1.hpp>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
 #include "include/assert.h"
 
 #include "rgw_client_io.h"
 
-// bufferlist to represent the message body
-class RGWBufferlistBody {
- public:
-  using value_type = ceph::bufferlist;
+namespace rgw {
+namespace asio {
 
-  class reader;
-  class writer;
+namespace beast = boost::beast;
+using parser_type = beast::http::request_parser<beast::http::buffer_body>;
 
-  template <bool isRequest, typename Headers>
-  using message_type = beast::http::message<isRequest, RGWBufferlistBody,
-                                            Headers>;
-};
-
-class RGWAsioClientIO : public rgw::io::RestfulClient,
-                        public rgw::io::BuffererSink {
+class ClientIO : public io::RestfulClient,
+                 public io::BuffererSink {
+ private:
   using tcp = boost::asio::ip::tcp;
-  tcp::socket socket;
+  tcp::socket& socket;
+  parser_type& parser;
+  beast::flat_buffer& buffer; //< parse buffer
 
-  using body_type = RGWBufferlistBody;
-  using request_type = beast::http::request_v1<body_type>;
-  request_type request;
-
-  bufferlist::const_iterator body_iter;
-
-  bool conn_keepalive{false};
-  bool conn_close{false};
   RGWEnv env;
 
   rgw::io::StaticOutputBufferer<> txbuf;
@@ -45,8 +32,9 @@ class RGWAsioClientIO : public rgw::io::RestfulClient,
   size_t read_data(char *buf, size_t max);
 
  public:
-  RGWAsioClientIO(tcp::socket&& socket, request_type&& request);
-  ~RGWAsioClientIO();
+  ClientIO(tcp::socket& socket, parser_type& parser,
+           beast::flat_buffer& buffer);
+  ~ClientIO() override;
 
   void init_env(CephContext *cct) override;
   size_t complete_request() override;
@@ -71,45 +59,7 @@ class RGWAsioClientIO : public rgw::io::RestfulClient,
   }
 };
 
-// used by beast::http::read() to read the body into a bufferlist
-class RGWBufferlistBody::reader {
-  value_type& bl;
- public:
-  template<bool isRequest, typename Headers>
-  explicit reader(message_type<isRequest, Headers>& m) : bl(m.body) {}
-
-  void write(const char* data, size_t size, boost::system::error_code&) {
-    bl.append(data, size);
-  }
-};
-
-// used by beast::http::write() to write the buffered body
-class RGWBufferlistBody::writer {
-  const value_type& bl;
- public:
-  template<bool isRequest, typename Headers>
-  explicit writer(const message_type<isRequest, Headers>& msg)
-    : bl(msg.body) {}
-
-  void init(boost::system::error_code& ec) {}
-  uint64_t content_length() const { return bl.length(); }
-
-  template<typename Write>
-  boost::tribool operator()(beast::http::resume_context&&,
-                            boost::system::error_code&, Write&& write) {
-    // translate from bufferlist to a ConstBufferSequence for beast
-    std::vector<boost::asio::const_buffer> buffers;
-    buffers.reserve(bl.get_num_buffers());
-    for (auto& ptr : bl.buffers()) {
-      buffers.emplace_back(ptr.c_str(), ptr.length());
-    }
-    write(buffers);
-    return true;
-  }
-};
-static_assert(beast::http::is_ReadableBody<RGWBufferlistBody>{},
-              "RGWBufferlistBody does not satisfy ReadableBody");
-static_assert(beast::http::is_WritableBody<RGWBufferlistBody>{},
-              "RGWBufferlistBody does not satisfy WritableBody");
+} // namespace asio
+} // namespace rgw
 
 #endif // RGW_ASIO_CLIENT_H

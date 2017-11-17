@@ -31,6 +31,7 @@ using namespace std;
 
 #include <errno.h>
 #include <sstream>
+#include <signal.h>
 
 #define SOCKET_PRIORITY_MIN_DELAY 6
 
@@ -41,6 +42,10 @@ class Messenger {
 private:
   list<Dispatcher*> dispatchers;
   list <Dispatcher*> fast_dispatchers;
+  ZTracer::Endpoint trace_endpoint;
+
+  void set_endpoint_addr(const entity_addr_t& a,
+                         const entity_name_t &name);
 
 protected:
   /// the "name" of the local daemon. eg client.99
@@ -102,31 +107,31 @@ public:
 	features_supported(CEPH_FEATURES_SUPPORTED_DEFAULT),
 	features_required(0) {}
   private:
-    Policy(bool l, bool s, bool st, bool r, uint64_t sup, uint64_t req)
+    Policy(bool l, bool s, bool st, bool r, uint64_t req)
       : lossy(l), server(s), standby(st), resetcheck(r),
 	throttler_bytes(NULL),
 	throttler_messages(NULL),
-	features_supported(sup | CEPH_FEATURES_SUPPORTED_DEFAULT),
+	features_supported(CEPH_FEATURES_SUPPORTED_DEFAULT),
 	features_required(req) {}
 
   public:
-    static Policy stateful_server(uint64_t sup, uint64_t req) {
-      return Policy(false, true, true, true, sup, req);
+    static Policy stateful_server(uint64_t req) {
+      return Policy(false, true, true, true, req);
     }
-    static Policy stateless_server(uint64_t sup, uint64_t req) {
-      return Policy(true, true, false, false, sup, req);
+    static Policy stateless_server(uint64_t req) {
+      return Policy(true, true, false, false, req);
     }
-    static Policy lossless_peer(uint64_t sup, uint64_t req) {
-      return Policy(false, false, true, false, sup, req);
+    static Policy lossless_peer(uint64_t req) {
+      return Policy(false, false, true, false, req);
     }
-    static Policy lossless_peer_reuse(uint64_t sup, uint64_t req) {
-      return Policy(false, false, true, true, sup, req);
+    static Policy lossless_peer_reuse(uint64_t req) {
+      return Policy(false, false, true, true, req);
     }
-    static Policy lossy_client(uint64_t sup, uint64_t req) {
-      return Policy(true, false, false, false, sup, req);
+    static Policy lossy_client(uint64_t req) {
+      return Policy(true, false, false, false, req);
     }
-    static Policy lossless_client(uint64_t sup, uint64_t req) {
-      return Policy(false, false, false, true, sup, req);
+    static Policy lossless_client(uint64_t req) {
+      return Policy(false, false, false, true, req);
     }
   };
 
@@ -136,7 +141,8 @@ public:
    * or use the create() function.
    */
   Messenger(CephContext *cct_, entity_name_t w)
-    : my_inst(),
+    : trace_endpoint("0.0.0.0", 0, "Messenger"),
+      my_inst(),
       default_send_priority(CEPH_MSG_PRIO_DEFAULT), started(false),
       magic(0),
       socket_priority(-1),
@@ -213,8 +219,18 @@ protected:
   /**
    * set messenger's address
    */
-  virtual void set_myaddr(const entity_addr_t& a) { my_inst.addr = a; }
+  virtual void set_myaddr(const entity_addr_t& a) {
+    my_inst.addr = a;
+    set_endpoint_addr(a, my_inst.name);
+  }
 public:
+  /**
+   * @return the zipkin trace endpoint
+   */
+  const ZTracer::Endpoint* get_trace_endpoint() const {
+    return &trace_endpoint;
+  }
+
   /**
    * Retrieve the Messenger's name.
    *
@@ -240,6 +256,14 @@ public:
    * @param addr The address to use as a template.
    */
   virtual void set_addr_unknowns(const entity_addr_t &addr) = 0;
+  /**
+   * Set the address for this Messenger. This is useful if the Messenger
+   * binds to a specific address but advertises a different address on the
+   * the network.
+   *
+   * @param addr The address to use.
+   */
+  virtual void set_addr(const entity_addr_t &addr) = 0;
   /// Get the default send priority.
   int get_default_send_priority() { return default_send_priority; }
   /**
@@ -535,11 +559,53 @@ protected:
   /**
    * @} // Subclass Interfacing
    */
+public:
+#ifdef CEPH_USE_SIGPIPE_BLOCKER
+  /**
+   * We need to disable SIGPIPE on all platforms, and if they
+   * don't give us a better mechanism (read: are on Solaris) that
+   * means blocking the signal whenever we do a send or sendmsg...
+   * That means any implementations must invoke MSGR_SIGPIPE_STOPPER in-scope
+   * whenever doing so. On most systems that's blank, but on systems where
+   * it's needed we construct an RAII object to plug and un-plug the SIGPIPE.
+   * See http://www.microhowto.info/howto/ignore_sigpipe_without_affecting_other_threads_in_a_process.html
+   */
+  struct sigpipe_stopper {
+    bool blocked;
+    sigset_t existing_mask;
+    sigset_t pipe_mask;
+    sigpipe_stopper() {
+      sigemptyset(&pipe_mask);
+      sigaddset(&pipe_mask, SIGPIPE);
+      sigset_t signals;
+      sigemptyset(&signals);
+      sigpending(&signals);
+      if (sigismember(&signals, SIGPIPE)) {
+	blocked = false;
+      } else {
+	blocked = true;
+	int r = pthread_sigmask(SIG_BLOCK, &pipe_mask, &existing_mask);
+	assert(r == 0);
+      }
+    }
+    ~sigpipe_stopper() {
+      if (blocked) {
+	struct timespec nowait{0};
+	int r = sigtimedwait(&pipe_mask, 0, &nowait);
+	assert(r == EAGAIN || r == 0);
+	r = pthread_sigmask(SIG_SETMASK, &existing_mask, 0);
+	assert(r == 0);
+      }
+    }
+  };
+#  define MSGR_SIGPIPE_STOPPER Messenger::sigpipe_stopper stopper();
+#else
+#  define MSGR_SIGPIPE_STOPPER
+#endif
   /**
    * @defgroup Dispatcher Interfacing
    * @{
    */
-public:
   /**
    * Determine whether a message can be fast-dispatched. We will
    * query each Dispatcher in sequence to determine if they are
@@ -547,7 +613,7 @@ public:
    *
    * @param m The Message we are testing.
    */
-  bool ms_can_fast_dispatch(Message *m) {
+  bool ms_can_fast_dispatch(const Message *m) {
     for (list<Dispatcher*>::iterator p = fast_dispatchers.begin();
 	 p != fast_dispatchers.end();
 	 ++p) {

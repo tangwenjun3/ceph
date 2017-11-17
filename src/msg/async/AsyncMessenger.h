@@ -17,25 +17,26 @@
 #ifndef CEPH_ASYNCMESSENGER_H
 #define CEPH_ASYNCMESSENGER_H
 
+#include <map>
+#include <mutex>
+using namespace std;
+
 #include "include/types.h"
 #include "include/xlist.h"
-
-#include <map>
-using namespace std;
+#include "include/spinlock.h"
 #include "include/unordered_map.h"
 #include "include/unordered_set.h"
 
 #include "common/Mutex.h"
-#include "include/atomic.h"
 #include "common/Cond.h"
 #include "common/Thread.h"
 
 #include "msg/SimplePolicyMessenger.h"
 #include "msg/DispatchQueue.h"
-#include "include/assert.h"
 #include "AsyncConnection.h"
 #include "Event.h"
 
+#include "include/assert.h"
 
 class AsyncMessenger;
 
@@ -89,18 +90,19 @@ public:
    * Destroy the AsyncMessenger. Pretty simple since all the work is done
    * elsewhere.
    */
-  virtual ~AsyncMessenger();
+  ~AsyncMessenger() override;
 
   /** @defgroup Accessors
    * @{
    */
   void set_addr_unknowns(const entity_addr_t &addr) override;
+  void set_addr(const entity_addr_t &addr) override;
 
-  int get_dispatch_queue_len() {
+  int get_dispatch_queue_len() override {
     return dispatch_queue.get_queue_len();
   }
 
-  double get_dispatch_queue_max_age(utime_t now) {
+  double get_dispatch_queue_max_age(utime_t now) override {
     return dispatch_queue.get_max_age(now);
   }
   /** @} Accessors */
@@ -109,14 +111,14 @@ public:
    * @defgroup Configuration functions
    * @{
    */
-  void set_cluster_protocol(int p) {
+  void set_cluster_protocol(int p) override {
     assert(!started && !did_bind);
     cluster_protocol = p;
   }
 
-  int bind(const entity_addr_t& bind_addr);
-  int rebind(const set<int>& avoid_ports);
-  int client_bind(const entity_addr_t& bind_addr);
+  int bind(const entity_addr_t& bind_addr) override;
+  int rebind(const set<int>& avoid_ports) override;
+  int client_bind(const entity_addr_t& bind_addr) override;
 
   /** @} Configuration functions */
 
@@ -148,9 +150,8 @@ public:
    */
   ConnectionRef get_connection(const entity_inst_t& dest) override;
   ConnectionRef get_loopback_connection() override;
-  int send_keepalive(Connection *con);
-  virtual void mark_down(const entity_addr_t& addr) override;
-  virtual void mark_down_all() override {
+  void mark_down(const entity_addr_t& addr) override;
+  void mark_down_all() override {
     shutdown_connections(true);
   }
   /** @} // Connection Management */
@@ -238,6 +239,17 @@ private:
   bool need_addr;
 
   /**
+   * set to bind address if bind was called before NetworkStack was ready to
+   * bind
+   */
+  entity_addr_t pending_bind_addr;
+
+  /**
+   * false; set to true if a pending bind exists
+   */
+  bool pending_bind = false;
+
+  /**
    *  The following aren't lock-protected since you shouldn't be able to race
    *  the only writers.
    */
@@ -250,7 +262,7 @@ private:
   /// counter for the global seq our connection protocol uses
   __u32 global_seq;
   /// lock to protect the global_seq
-  ceph_spinlock_t global_seq_lock;
+  ceph::spinlock global_seq_lock;
 
   /**
    * hash map of addresses to Asyncconnection
@@ -343,6 +355,8 @@ public:
       // If conn already in, we will return 0
       Mutex::Locker l(deleted_lock);
       if (deleted_conns.erase(existing)) {
+        existing->get_perf_counter()->dec(l_msgr_active_connections);
+        conns.erase(it);
       } else if (conn != existing) {
         return -1;
       }
@@ -382,11 +396,12 @@ public:
    * @return a global sequence ID that nobody else has seen.
    */
   __u32 get_global_seq(__u32 old=0) {
-    ceph_spin_lock(&global_seq_lock);
+    std::lock_guard<ceph::spinlock> lg(global_seq_lock);
+
     if (old > global_seq)
       global_seq = old;
     __u32 ret = ++global_seq;
-    ceph_spin_unlock(&global_seq_lock);
+
     return ret;
   }
   /**

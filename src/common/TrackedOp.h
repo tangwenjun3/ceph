@@ -13,16 +13,10 @@
 
 #ifndef TRACKEDREQUEST_H_
 #define TRACKEDREQUEST_H_
-#include <sstream>
-#include <stdint.h>
-#include <boost/intrusive/list.hpp>
-#include <atomic>
 
-#include "include/utime.h"
-#include "common/Mutex.h"
+#include <atomic>
 #include "common/histogram.h"
 #include "msg/Message.h"
-#include "include/memory.h"
 #include "common/RWLock.h"
 
 #define OPTRACKER_PREALLOC_EVENTS 20
@@ -33,38 +27,49 @@ typedef boost::intrusive_ptr<TrackedOp> TrackedOpRef;
 class OpHistory {
   set<pair<utime_t, TrackedOpRef> > arrived;
   set<pair<double, TrackedOpRef> > duration;
+  set<pair<utime_t, TrackedOpRef> > slow_op;
   Mutex ops_history_lock;
   void cleanup(utime_t now);
   bool shutdown;
   uint32_t history_size;
   uint32_t history_duration;
+  uint32_t history_slow_op_size;
+  uint32_t history_slow_op_threshold;
 
 public:
   OpHistory() : ops_history_lock("OpHistory::Lock"), shutdown(false),
-  history_size(0), history_duration(0) {}
+    history_size(0), history_duration(0),
+    history_slow_op_size(0), history_slow_op_threshold(0) {}
   ~OpHistory() {
     assert(arrived.empty());
     assert(duration.empty());
+    assert(slow_op.empty());
   }
   void insert(utime_t now, TrackedOpRef op);
-  void dump_ops(utime_t now, Formatter *f);
+  void dump_ops(utime_t now, Formatter *f, set<string> filters = {""});
+  void dump_ops_by_duration(utime_t now, Formatter *f, set<string> filters = {""});
+  void dump_slow_ops(utime_t now, Formatter *f, set<string> filters = {""});
   void on_shutdown();
   void set_size_and_duration(uint32_t new_size, uint32_t new_duration) {
     history_size = new_size;
     history_duration = new_duration;
+  }
+  void set_slow_op_size_and_threshold(uint32_t new_size, uint32_t new_threshold) {
+    history_slow_op_size = new_size;
+    history_slow_op_threshold = new_threshold;
   }
 };
 
 struct ShardedTrackingData;
 class OpTracker {
   friend class OpHistory;
-  atomic64_t seq;
+  std::atomic<int64_t> seq = { 0 };
   vector<ShardedTrackingData*> sharded_in_flight_list;
   uint32_t num_optracker_shards;
   OpHistory history;
   float complaint_time;
   int log_threshold;
-  bool tracking_enabled;
+  std::atomic<bool> tracking_enabled;
   RWLock       lock;
 
 public:
@@ -78,12 +83,18 @@ public:
   void set_history_size_and_duration(uint32_t new_size, uint32_t new_duration) {
     history.set_size_and_duration(new_size, new_duration);
   }
+  void set_history_slow_op_size_and_threshold(uint32_t new_size, uint32_t new_threshold) {
+    history.set_slow_op_size_and_threshold(new_size, new_threshold);
+  }
+  bool is_tracking() const {
+    return tracking_enabled;
+  }
   void set_tracking(bool enable) {
-    RWLock::WLocker l(lock);
     tracking_enabled = enable;
   }
-  bool dump_ops_in_flight(Formatter *f, bool print_only_blocked=false);
-  bool dump_historic_ops(Formatter *f);
+  bool dump_ops_in_flight(Formatter *f, bool print_only_blocked = false, set<string> filters = {""});
+  bool dump_historic_ops(Formatter *f, bool by_duration = false, set<string> filters = {""});
+  bool dump_historic_slow_ops(Formatter *f, set<string> filters = {""});
   bool register_inflight_op(TrackedOp *i);
   void unregister_inflight_op(TrackedOp *i);
 
@@ -188,6 +199,7 @@ protected:
 
   mutable string desc_str;   ///< protected by lock
   mutable const char *desc = nullptr;  ///< readable without lock
+  mutable atomic<bool> want_new_desc = {false};
 
   TrackedOp(OpTracker *_tracker, const utime_t& initiated) :
     tracker(_tracker),
@@ -203,9 +215,16 @@ protected:
   /// return a unique descriptor of the Op; eg the message it's attached to
   virtual void _dump_op_descriptor_unlocked(ostream& stream) const = 0;
   /// called when the last non-OpTracker reference is dropped
-  virtual void _unregistered() {};
+  virtual void _unregistered() {}
+
+  virtual bool filter_out(const set<string>& filters) { return true; }
 
 public:
+  ZTracer::Trace osd_trace;
+  ZTracer::Trace pg_trace;
+  ZTracer::Trace store_trace;
+  ZTracer::Trace journal_trace;
+
   virtual ~TrackedOp() {}
 
   void get() {
@@ -235,7 +254,7 @@ public:
   }
 
   const char *get_desc() const {
-    if (!desc) {
+    if (!desc || want_new_desc.load()) {
       Mutex::Locker l(lock);
       _gen_desc();
     }
@@ -247,10 +266,11 @@ private:
     _dump_op_descriptor_unlocked(ss);
     desc_str = ss.str();
     desc = desc_str.c_str();
+    want_new_desc = false;
   }
 public:
   void reset_desc() {
-    desc = nullptr;
+    want_new_desc = true;
   }
 
   const utime_t& get_initiated() const {

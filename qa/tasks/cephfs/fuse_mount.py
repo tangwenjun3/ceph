@@ -23,6 +23,18 @@ class FuseMount(CephFSMount):
         self._fuse_conn = None
 
     def mount(self, mount_path=None, mount_fs_name=None):
+        try:
+            return self._mount(mount_path, mount_fs_name)
+        except RuntimeError:
+            # Catch exceptions by the mount() logic (i.e. not remote command
+            # failures) and ensure the mount is not left half-up.
+            # Otherwise we might leave a zombie mount point that causes
+            # anyone traversing cephtest/ to get hung up on.
+            log.warn("Trying to clean up after failed mount")
+            self.umount_wait(force=True)
+            raise
+
+    def _mount(self, mount_path, mount_fs_name):
         log.info("Client client.%s config is %s" % (self.client_id, self.client_config))
 
         daemon_signal = 'kill'
@@ -210,6 +222,15 @@ class FuseMount(CephFSMount):
         except run.CommandFailedError:
             log.info('Failed to unmount ceph-fuse on {name}, aborting...'.format(name=self.client_remote.name))
 
+            self.client_remote.run(args=[
+                'sudo',
+                run.Raw('PATH=/usr/sbin:$PATH'),
+                'lsof',
+                run.Raw(';'),
+                'ps',
+                'auxf',
+            ])
+
             # abort the fuse mount, killing all hung processes
             if self._fuse_conn:
                 self.run_python(dedent("""
@@ -298,6 +319,7 @@ class FuseMount(CephFSMount):
         """
         Terminate the client without removing the mount point.
         """
+        log.info('Killing ceph-fuse connection on {name}...'.format(name=self.client_remote.name))
         self.fuse_daemon.stdin.close()
         try:
             self.fuse_daemon.wait()
@@ -308,6 +330,7 @@ class FuseMount(CephFSMount):
         """
         Follow up ``kill`` to get to a clean unmounted state.
         """
+        log.info('Cleaning up killed ceph-fuse connection')
         self.umount()
         self.cleanup()
 

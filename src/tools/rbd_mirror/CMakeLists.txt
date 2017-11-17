@@ -1,34 +1,48 @@
 add_library(rbd_mirror_types STATIC
+  image_map/Types.cc
+  instance_watcher/Types.cc
   leader_watcher/Types.cc)
 
 set(rbd_mirror_internal
   ClusterWatcher.cc
-  ImageReplayer.cc
   ImageDeleter.cc
+  ImageMap.cc
+  ImageReplayer.cc
   ImageSync.cc
   ImageSyncThrottler.cc
+  InstanceReplayer.cc
+  InstanceWatcher.cc
+  Instances.cc
   LeaderWatcher.cc
   Mirror.cc
   MirrorStatusWatcher.cc
+  PoolReplayer.cc
   PoolWatcher.cc
-  Replayer.cc
+  ServiceDaemon.cc
   Threads.cc
   types.cc
+  image_map/Action.cc
+  image_map/LoadRequest.cc
+  image_map/Policy.cc
+  image_map/SimplePolicy.cc
+  image_map/StateTransition.cc
+  image_map/UpdateRequest.cc
   image_replayer/BootstrapRequest.cc
   image_replayer/CloseImageRequest.cc
   image_replayer/CreateImageRequest.cc
   image_replayer/EventPreprocessor.cc
+  image_replayer/GetMirrorImageIdRequest.cc
   image_replayer/IsPrimaryRequest.cc
   image_replayer/OpenImageRequest.cc
   image_replayer/OpenLocalImageRequest.cc
+  image_replayer/PrepareLocalImageRequest.cc
+  image_replayer/PrepareRemoteImageRequest.cc
   image_replayer/ReplayStatusFormatter.cc
-  image_sync/ImageCopyRequest.cc
-  image_sync/ObjectCopyRequest.cc
-  image_sync/SnapshotCopyRequest.cc
-  image_sync/SnapshotCreateRequest.cc
   image_sync/SyncPointCreateRequest.cc
   image_sync/SyncPointPruneRequest.cc
-  pool_watcher/RefreshImagesRequest.cc)
+  pool_watcher/RefreshImagesRequest.cc
+  service_daemon/Types.cc)
+
 add_library(rbd_mirror_internal STATIC
   ${rbd_mirror_internal})
 

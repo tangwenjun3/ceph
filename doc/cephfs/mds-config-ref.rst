@@ -19,13 +19,30 @@
 :Type:  64-bit Integer Unsigned
 :Default:  ``1ULL << 40``
 
+``mds cache memory limit``
+
+:Description: The memory limit the MDS should enforce for its cache.
+              Administrators should use this instead of ``mds cache size``.
+:Type:  64-bit Integer Unsigned
+:Default: ``1073741824``
+
+``mds cache reservation``
+
+:Description: The cache reservation (memory or inodes) for the MDS cache to maintain.
+              Once the MDS begins dipping into its reservation, it will recall
+              client state until its cache size shrinks to restore the
+              reservation.
+:Type:  Float
+:Default: ``0.05``
 
 ``mds cache size``
 
-:Description: The number of inodes to cache.
+:Description: The number of inodes to cache. A value of 0 indicates an
+              unlimited number. It is recommended to use
+              ``mds_cache_memory_limit`` to limit the amount of memory the MDS
+              cache uses.
 :Type:  32-bit Integer
-:Default: ``100000``
-
+:Default: ``0``
 
 ``mds cache mid``
 
@@ -80,7 +97,12 @@
 
 ``mds blacklist interval``
 
-:Description: The blacklist duration for failed MDSs in the OSD map.
+:Description: The blacklist duration for failed MDSs in the OSD map. Note,
+              this controls how long failed MDS daemons will stay in the
+              OSDMap blacklist. It has no effect on how long something is
+              blacklisted when the administrator blacklists it manually. For
+              example, ``ceph osd blacklist add`` will still use the default
+              blacklist time.
 :Type:  Float
 :Default: ``24.0*60.0``
 
@@ -162,15 +184,6 @@
 :Description: The function to use for hashing files across directory fragments.
 :Type:  32-bit Integer
 :Default: ``2`` (i.e., rjenkins)
-
-
-``mds log``
-
-:Description: Set to ``true`` if the MDS should journal metadata updates 
-              (disabled for benchmarking only).
-              
-:Type:  Boolean
-:Default: ``true``
 
 
 ``mds log skip corrupt events``
@@ -561,7 +574,7 @@
               (for testing only).
               
 :Type:  Boolean
-:Default: ``0``
+:Default: ``false``
 
 
 ``mds wipe ino prealloc``
@@ -570,7 +583,7 @@
               (for testing only).
               
 :Type:  Boolean
-:Default: ``0``
+:Default: ``false``
 
 
 ``mds skip ino``
@@ -605,3 +618,17 @@
               
 :Type:  Boolean
 :Default:  ``false``
+
+
+``mds min caps per client``
+
+:Description: Set the minimum number of capabilities a client may hold.
+:Type: Integer
+:Default: ``100``
+
+
+``mds max ratio caps per client``
+
+:Description: Set the maximum ratio of current caps that may be recalled during MDS cache pressure.
+:Type: Float
+:Default: ``0.8``

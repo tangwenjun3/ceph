@@ -157,10 +157,26 @@ void install_standard_sighandlers(void)
 #include "common/Thread.h"
 #include <errno.h>
 
+#ifdef __APPLE__
+#include <libproc.h>
+
+string get_name_by_pid(pid_t pid)
+{
+  char buf[PROC_PIDPATHINFO_MAXSIZE];
+  int ret = proc_pidpath(pid, buf, sizeof(buf));
+  if (ret == 0) {
+    derr << "Fail to proc_pidpath(" << pid << ")"
+	 << " error = " << cpp_strerror(ret)
+	 << dendl;
+    return "<unknown>";
+  }
+  return string(buf, ret);
+}
+#else
 string get_name_by_pid(pid_t pid)
 {
   char proc_pid_path[PATH_MAX] = {0};
-  snprintf(proc_pid_path, PATH_MAX, "/proc/%d/cmdline", pid);
+  snprintf(proc_pid_path, PATH_MAX, PROCPREFIX "/proc/%d/cmdline", pid);
   int fd = open(proc_pid_path, O_RDONLY);
 
   if (fd < 0) {
@@ -185,7 +201,7 @@ string get_name_by_pid(pid_t pid)
   std::replace(buf, buf + ret, '\0', ' ');
   return string(buf, ret);
 }
-
+#endif
  
 /**
  * safe async signal handler / dispatcher
@@ -240,7 +256,7 @@ struct SignalHandler : public Thread {
     create("signal_handler");
   }
 
-  ~SignalHandler() {
+  ~SignalHandler() override {
     shutdown();
   }
 

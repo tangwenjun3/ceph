@@ -14,9 +14,8 @@
 
 #include "strtol.h"
 
-#include <cerrno>
 #include <climits>
-#include <cstdlib>
+#include <limits>
 #include <sstream>
 
 using std::ostringstream;
@@ -62,7 +61,7 @@ int strict_strtol(const char *str, int base, std::string *err)
   long long ret = strict_strtoll(str, base, err);
   if (!err->empty())
     return 0;
-  if ((ret <= INT_MIN) || (ret >= INT_MAX)) {
+  if ((ret < INT_MIN) || (ret > INT_MAX)) {
     errStr = "The option value '";
     errStr.append(str);
     errStr.append("'");

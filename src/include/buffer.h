@@ -17,6 +17,7 @@
 #if defined(__linux__) || defined(__FreeBSD__)
 #include <stdlib.h>
 #endif
+#include <limits.h>
 
 #ifndef _XOPEN_SOURCE
 # define _XOPEN_SOURCE 600
@@ -77,19 +78,19 @@ namespace buffer CEPH_BUFFER_API {
    */
 
   struct error : public std::exception{
-    const char *what() const throw ();
+    const char *what() const throw () override;
   };
   struct bad_alloc : public error {
-    const char *what() const throw ();
+    const char *what() const throw () override;
   };
   struct end_of_buffer : public error {
-    const char *what() const throw ();
+    const char *what() const throw () override;
   };
   struct malformed_input : public error {
     explicit malformed_input(const std::string& w) {
       snprintf(buf, sizeof(buf), "buffer::malformed_input: %s", w.c_str());
     }
-    const char *what() const throw ();
+    const char *what() const throw () override;
   private:
     char buf[256];
   };
@@ -115,6 +116,8 @@ namespace buffer CEPH_BUFFER_API {
   int get_cached_crc();
   /// count of cached crc hits (mismatching input, required adjustment)
   int get_cached_crc_adjusted();
+  /// count of crc cache misses
+  int get_missed_crc();
   /// enable/disable tracking of cached crcs
   void track_cached_crc(bool b);
 
@@ -133,6 +136,7 @@ namespace buffer CEPH_BUFFER_API {
   class raw_posix_aligned;
   class raw_hack_aligned;
   class raw_char;
+  class raw_claimed_char;
   class raw_pipe;
   class raw_unshareable; // diagnostic, unshareable char buffer
   class raw_combined;
@@ -147,11 +151,13 @@ namespace buffer CEPH_BUFFER_API {
    */
   raw* copy(const char *c, unsigned len);
   raw* create(unsigned len);
+  raw* create_in_mempool(unsigned len, int mempool);
   raw* claim_char(unsigned len, char *buf);
   raw* create_malloc(unsigned len);
   raw* claim_malloc(unsigned len, char *buf);
   raw* create_static(unsigned len, char *buf);
   raw* create_aligned(unsigned len, unsigned align);
+  raw* create_aligned_in_mempool(unsigned len, unsigned align, int mempool);
   raw* create_page_aligned(unsigned len);
   raw* create_zero_copy(unsigned len, int fd, int64_t *offset);
   raw* create_unshareable(unsigned len);
@@ -177,7 +183,7 @@ namespace buffer CEPH_BUFFER_API {
       const char *start; ///< starting pointer into bp->c_str()
       const char *pos;   ///< pointer into bp->c_str()
       const char *end_ptr;   ///< pointer to bp->end_c_str()
-      bool deep;         ///< if true, no not allow shallow ptr copies
+      bool deep;         ///< if true, do not allow shallow ptr copies
 
       iterator(const ptr *p, size_t offset, bool d)
 	: bp(p),
@@ -284,6 +290,10 @@ namespace buffer CEPH_BUFFER_API {
       return have_raw() && (start() > 0 || end() < raw_length());
     }
 
+    int get_mempool() const;
+    void reassign_to_mempool(int pool);
+    void try_assign_to_mempool(int pool);
+
     // accessors
     raw *get_raw() const { return _raw; }
     const char *c_str() const;
@@ -307,7 +317,7 @@ namespace buffer CEPH_BUFFER_API {
     bool can_zero_copy() const;
     int zero_copy_to_fd(int fd, int64_t *offset) const;
 
-    unsigned wasted();
+    unsigned wasted() const;
 
     int cmp(const ptr& o) const;
     bool is_zero() const;
@@ -438,6 +448,7 @@ namespace buffer CEPH_BUFFER_API {
 
       void advance(int o);
       void seek(unsigned o);
+      using iterator_impl<false>::operator*;
       char operator*();
       iterator& operator++();
       ptr get_current_ptr();
@@ -588,7 +599,6 @@ namespace buffer CEPH_BUFFER_API {
 
     class page_aligned_appender {
       bufferlist *pbl;
-      size_t offset;
       unsigned min_alloc;
       ptr buffer;
       char *pos, *end;
@@ -685,6 +695,14 @@ namespace buffer CEPH_BUFFER_API {
     const ptr& front() const { return _buffers.front(); }
     const ptr& back() const { return _buffers.back(); }
 
+    int get_mempool() const;
+    void reassign_to_mempool(int pool);
+    void try_assign_to_mempool(int pool);
+
+    size_t get_append_buffer_unused_tail_length() const {
+      return append_buffer.unused_tail_length();
+    }
+
     unsigned get_memcopy_count() const {return _memcopy_count; }
     const std::list<ptr>& buffers() const { return _buffers; }
     void swap(list& other);
@@ -762,16 +780,14 @@ namespace buffer CEPH_BUFFER_API {
     void rebuild();
     void rebuild(ptr& nb);
     bool rebuild_aligned(unsigned align);
+    // max_buffers = 0 mean don't care _buffers.size(), other
+    // must make _buffers.size() <= max_buffers after rebuilding.
     bool rebuild_aligned_size_and_memory(unsigned align_size,
-					 unsigned align_memory);
+					 unsigned align_memory,
+					 unsigned max_buffers = 0);
     bool rebuild_page_aligned();
 
-    void reserve(size_t prealloc) {
-      if (append_buffer.unused_tail_length() < prealloc) {
-	append_buffer = buffer::create(prealloc);
-	append_buffer.set_length(0);   // unused, so far.
-      }
-    }
+    void reserve(size_t prealloc);
 
     // assignment-op with move semantics
     const static unsigned int CLAIM_DEFAULT = 0;
@@ -780,6 +796,8 @@ namespace buffer CEPH_BUFFER_API {
     void claim(list& bl, unsigned int flags = CLAIM_DEFAULT);
     void claim_append(list& bl, unsigned int flags = CLAIM_DEFAULT);
     void claim_prepend(list& bl, unsigned int flags = CLAIM_DEFAULT);
+    // only for bl is bufferlist::page_aligned_appender
+    void claim_append_piecewise(list& bl);
 
     // clone non-shareable buffers (make shareable)
     void make_shareable() {
@@ -867,9 +885,26 @@ namespace buffer CEPH_BUFFER_API {
     int write_fd(int fd) const;
     int write_fd(int fd, uint64_t offset) const;
     int write_fd_zero_copy(int fd) const;
-    void prepare_iov(std::vector<iovec> *piov) const;
+    template<typename VectorT>
+    void prepare_iov(VectorT *piov) const {
+      assert(_buffers.size() <= IOV_MAX);
+      piov->resize(_buffers.size());
+      unsigned n = 0;
+      for (auto& p : _buffers) {
+	(*piov)[n].iov_base = (void *)p.c_str();
+	(*piov)[n].iov_len = p.length();
+	++n;
+      }
+    }
     uint32_t crc32c(uint32_t crc) const;
     void invalidate_crc();
+
+    // These functions return a bufferlist with a pointer to a single
+    // static buffer. They /must/ not outlive the memory they
+    // reference.
+    static list static_from_mem(char* c, size_t l);
+    static list static_from_cstring(char* c);
+    static list static_from_string(std::string& s);
   };
 
   /*
@@ -884,7 +919,7 @@ namespace buffer CEPH_BUFFER_API {
     // cppcheck-suppress noExplicitConstructor
     hash(uint32_t init) : crc(init) { }
 
-    void update(buffer::list& bl) {
+    void update(const buffer::list& bl) {
       crc = bl.crc32c(crc);
     }
 
@@ -936,7 +971,7 @@ std::ostream& operator<<(std::ostream& out, const buffer::list& bl);
 
 std::ostream& operator<<(std::ostream& out, const buffer::error& e);
 
-inline bufferhash& operator<<(bufferhash& l, bufferlist &r) {
+inline bufferhash& operator<<(bufferhash& l, const bufferlist &r) {
   l.update(r);
   return l;
 }

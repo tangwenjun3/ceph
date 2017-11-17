@@ -25,12 +25,12 @@ class MPoolOp : public PaxosServiceMessage {
 
 public:
   uuid_d fsid;
-  __u32 pool;
+  __u32 pool = 0;
   string name;
-  __u32 op;
-  uint64_t auid;
+  __u32 op = 0;
+  uint64_t auid = 0;
   snapid_t snapid;
-  __s16 crush_rule;
+  __s16 crush_rule = 0;
 
   MPoolOp()
     : PaxosServiceMessage(CEPH_MSG_POOLOP, 0, HEAD_VERSION, COMPAT_VERSION) { }
@@ -49,11 +49,11 @@ public:
   }
 
 private:
-  ~MPoolOp() {}
+  ~MPoolOp() override {}
 
 public:
-  const char *get_type_name() const { return "poolop"; }
-  void print(ostream& out) const {
+  const char *get_type_name() const override { return "poolop"; }
+  void print(ostream& out) const override {
     out << "pool_op(" << ceph_pool_op_name(op) << " pool " << pool
 	<< " auid " << auid
 	<< " tid " << get_tid()
@@ -61,7 +61,7 @@ public:
 	<< " v" << version << ")";
   }
 
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     paxos_encode();
     ::encode(fsid, payload);
     ::encode(pool, payload);
@@ -73,7 +73,7 @@ public:
     ::encode(pad, payload);  /* for v3->v4 encoding change */
     ::encode(crush_rule, payload);
   }
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     paxos_decode(p);
     ::decode(fsid, p);

@@ -89,11 +89,17 @@ which are as follows:
 :command:`bucket check`
   Check bucket index.
 
+:command:`bucket rewrite`
+  Rewrite all objects in the specified bucket.
+
 :command:`object rm`
   Remove an object.
 
 :command:`object unlink`
   Unlink object from bucket index.
+
+:command:`object rewrite`
+  Rewrite the specified object.
 
 :command:`quota set`
   Set quota params.
@@ -130,6 +136,24 @@ which are as follows:
 
 :command:`zone list`
   List all zones set on this cluster.
+
+:command:`metadata sync status`
+  Get metadata sync status.
+
+:command:`metadata sync init`
+  Init metadata sync.
+
+:command:`metadata sync run`
+  Run metadata sync.
+
+:command:`data sync status`
+  Get data sync status of the specified source zone.
+  
+:command:`data sync init`
+  Init data sync for the specified source zone.
+
+:command:`data sync run`
+  Run data sync for the specified source zone.
 
 :command:`pool add`
   Add an existing pool for data placement.
@@ -220,6 +244,20 @@ which are as follows:
 :command:`orphans finish`
   Clean up search for leaked rados objects
 
+:command:`reshard add`
+  Schedule a resharding of a bucket
+
+:command:`reshard list`
+  List all bucket resharding or scheduled to be resharded
+
+:command:`reshard process`
+  Process of scheduled reshard jobs
+
+:command:`reshard status`
+  Resharding status of a bucket
+
+:command:`reshard cancel`
+  Cancel resharding a bucket
 
 Options
 =======
@@ -268,7 +306,7 @@ Options
 
 .. option:: --key-type=<type>
 
-	key type, options are: swift, S3.
+	key type, options are: swift, s3.
 
 .. option:: --temp-url-key[-2]=<key>
 
@@ -331,6 +369,10 @@ Options
 
 	Zone in which radosgw is running.
 
+.. option:: --source-zone=<zone>
+
+  Specify the source zone for data sync.
+
 .. option:: --fix
 
 	Besides checking bucket index, will also fix it.
@@ -382,10 +424,27 @@ Options
 
 	List of caps (e.g., "usage=read, write; user=read".
 
+.. option:: --compression=<compression-algorithm>
+
+    Placement target compression algorithm (lz4|snappy|zlib|zstd)
+
 .. option:: --yes-i-really-mean-it
 
 	Required for certain operations.
 
+.. option:: --min-rewrite-size
+
+    Specify the min object size condition for bucket rewrite (default 4M).
+
+.. option:: --max-rewrite-size
+
+    Specify the max object size condition for bucket rewrite (default ULLONG_MAX).
+
+.. option:: --min-rewrite-stripe-size
+
+    Specify the min stripe size condition for object rewrite,
+    default value is set to 0, in that case the specified object
+    will always be rewritten for restriping.
 
 Quota Options
 =============
@@ -457,7 +516,15 @@ Remove a user and all associated buckets with their contents::
 
 Remove a bucket::
 
-        $ radosgw-admin bucket unlink --bucket=foo
+	$ radosgw-admin bucket rm --bucket=foo
+
+Link bucket to specified user::
+	
+	$ radosgw-admin bucket link --bucket=foo --bucket_id=<bucket id> --uid=johnny
+
+Unlink bucket from specified user::
+
+        $ radosgw-admin bucket unlink --bucket=foo --uid=johnny
 
 Show the logs of a bucket from April 1st, 2012::
 

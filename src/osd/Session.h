@@ -17,17 +17,24 @@
 
 #include "common/RefCountedObj.h"
 #include "common/Mutex.h"
-#include "include/Spinlock.h"
+#include "include/spinlock.h"
 #include "OSDCap.h"
 #include "Watch.h"
 #include "OSDMap.h"
+
+//#define PG_DEBUG_REFS
 
 struct Session;
 typedef boost::intrusive_ptr<Session> SessionRef;
 struct Backoff;
 typedef boost::intrusive_ptr<Backoff> BackoffRef;
 class PG;
+#ifdef PG_DEBUG_REFS
+#include "common/tracked_int_ptr.hpp"
+typedef TrackedIntPtr<PG> PGRef;
+#else
 typedef boost::intrusive_ptr<PG> PGRef;
+#endif
 
 /*
  * A Backoff represents one instance of either a PG or an OID
@@ -130,12 +137,9 @@ struct Session : public RefCountedObject {
   Mutex session_dispatch_lock;
   boost::intrusive::list<OpRequest> waiting_on_map;
 
-  OSDMapRef osdmap;  /// Map as of which waiting_for_pg is current
-  map<spg_t, boost::intrusive::list<OpRequest> > waiting_for_pg;
-
-  Spinlock sent_epoch_lock;
+  ceph::spinlock sent_epoch_lock;
   epoch_t last_sent_epoch;
-  Spinlock received_map_lock;
+  ceph::spinlock received_map_lock;
   epoch_t received_map_epoch; // largest epoch seen in MOSDMap from here
 
   /// protects backoffs; orders inside Backoff::lock *and* PG::backoff_lock
@@ -153,11 +157,6 @@ struct Session : public RefCountedObject {
     last_sent_epoch(0), received_map_epoch(0),
     backoff_lock("Session::backoff_lock")
     {}
-  void maybe_reset_osdmap() {
-    if (waiting_for_pg.empty()) {
-      osdmap.reset();
-    }
-  }
 
   void ack_backoff(
     CephContext *cct,
@@ -195,7 +194,7 @@ struct Session : public RefCountedObject {
   }
 
   bool check_backoff(
-    CephContext *cct, spg_t pgid, const hobject_t& oid, Message *m);
+    CephContext *cct, spg_t pgid, const hobject_t& oid, const Message *m);
 
   void add_backoff(BackoffRef b) {
     Mutex::Locker l(backoff_lock);

@@ -112,14 +112,15 @@ static int getgroups(fuse_req_t req, gid_t **sgids)
     return 0;
   }
 
-  *sgids = (gid_t*)malloc(c*sizeof(**sgids));
-  if (!*sgids) {
+  gid_t *gids = new (std::nothrow) gid_t[c];
+  if (!gids) {
     return -ENOMEM;
   }
-  c = fuse_req_getgroups(req, c, *sgids);
+  c = fuse_req_getgroups(req, c, gids);
   if (c < 0) {
-    free(*sgids);
-    return c;
+    delete[] gids;
+  } else {
+    *sgids = gids;
   }
   return c;
 #endif
@@ -134,7 +135,7 @@ static int getgroups_cb(void *handle, gid_t **sgids)
 }
 
 #define GET_GROUPS(perms, req)	{				\
-  if (cfuse->client->cct->_conf->fuse_set_user_groups) {	\
+  if (g_conf->get_val<bool>("fuse_set_user_groups")) {	\
     gid_t *gids = NULL;						\
     int count = getgroups(req, &gids);				\
     perms.init_gids(gids, count);				\
@@ -221,7 +222,7 @@ static void fuse_ll_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
   if (to_set & FUSE_SET_ATTR_MTIME) mask |= CEPH_SETATTR_MTIME;
   if (to_set & FUSE_SET_ATTR_ATIME) mask |= CEPH_SETATTR_ATIME;
   if (to_set & FUSE_SET_ATTR_SIZE) mask |= CEPH_SETATTR_SIZE;
-#if !defined(DARWIN)
+#if !defined(__APPLE__)
   if (to_set & FUSE_SET_ATTR_MTIME_NOW) mask |= CEPH_SETATTR_MTIME_NOW;
   if (to_set & FUSE_SET_ATTR_ATIME_NOW) mask |= CEPH_SETATTR_ATIME_NOW;
 #endif
@@ -240,7 +241,7 @@ static void fuse_ll_setattr(fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 static void fuse_ll_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
 			     const char *value, size_t size, 
 			     int flags
-#if defined(DARWIN)
+#if defined(__APPLE__)
 			     ,uint32_t pos
 #endif
   )
@@ -279,7 +280,7 @@ static void fuse_ll_listxattr(fuse_req_t req, fuse_ino_t ino, size_t size)
 
 static void fuse_ll_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
 			     size_t size
-#if defined(DARWIN)
+#if defined(__APPLE__)
 			     ,uint32_t position
 #endif
   )
@@ -867,7 +868,7 @@ static void fuse_ll_flock(fuse_req_t req, fuse_ino_t ino,
 }
 #endif
 
-#if !defined(DARWIN)
+#if !defined(__APPLE__)
 static mode_t umask_cb(void *handle)
 {
   CephFuse::Handle *cfuse = (CephFuse::Handle *)handle;
@@ -922,7 +923,7 @@ static void do_init(void *data, fuse_conn_info *conn)
   CephFuse::Handle *cfuse = (CephFuse::Handle *)data;
   Client *client = cfuse->client;
 
-#if !defined(DARWIN)
+#if !defined(__APPLE__)
   if (!client->cct->_conf->fuse_default_permissions &&
       client->ll_handle_umask()) {
     // apply umask in userspace if posix acl is enabled
@@ -1130,7 +1131,7 @@ int CephFuse::Handle::start()
     remount_cb: remount_cb,
 #endif
     getgroups_cb: getgroups_cb,
-#if !defined(DARWIN)
+#if !defined(__APPLE__)
     umask_cb: umask_cb,
 #endif
   };

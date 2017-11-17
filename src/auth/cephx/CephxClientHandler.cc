@@ -19,6 +19,7 @@
 #include "CephxProtocol.h"
 
 #include "auth/KeyRing.h"
+#include "include/random.h"
 #include "common/config.h"
 #include "common/dout.h"
 
@@ -53,7 +54,7 @@ int CephxClientHandler::build_request(bufferlist& bl) const
     }
 
     CephXAuthenticate req;
-    get_random_bytes((char *)&req.client_challenge, sizeof(req.client_challenge));
+    req.client_challenge = ceph::util::generate_random_number<uint64_t>();
     std::string error;
     cephx_calc_client_server_challenge(cct, secret, server_challenge,
 				       req.client_challenge, &req.key, error);
@@ -70,7 +71,8 @@ int CephxClientHandler::build_request(bufferlist& bl) const
 
     ::encode(req, bl);
 
-    ldout(cct, 10) << "get auth session key: client_challenge " << req.client_challenge << dendl;
+    ldout(cct, 10) << "get auth session key: client_challenge "
+		   << hex << req.client_challenge << dendl;
     return 0;
   }
 
@@ -117,7 +119,8 @@ int CephxClientHandler::handle_response(int ret, bufferlist::iterator& indata)
     CephXServerChallenge ch;
     ::decode(ch, indata);
     server_challenge = ch.server_challenge;
-    ldout(cct, 10) << " got initial server challenge " << server_challenge << dendl;
+    ldout(cct, 10) << " got initial server challenge "
+		   << hex << server_challenge << dendl;
     starting = false;
 
     tickets.invalidate_ticket(CEPH_ENTITY_TYPE_AUTH);
@@ -184,7 +187,7 @@ int CephxClientHandler::handle_response(int ret, bufferlist::iterator& indata)
 	    << error << dendl;
 	  return -EINVAL;
 	} else {
-	  rotating_secrets->set_secrets(secrets);
+	  rotating_secrets->set_secrets(std::move(secrets));
 	}
       }
     }

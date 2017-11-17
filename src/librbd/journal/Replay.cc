@@ -5,13 +5,14 @@
 #include "common/dout.h"
 #include "common/errno.h"
 #include "common/WorkQueue.h"
-#include "librbd/AioCompletion.h"
-#include "librbd/AioImageRequest.h"
+#include "librbd/ExclusiveLock.h"
 #include "librbd/ImageCtx.h"
 #include "librbd/ImageState.h"
 #include "librbd/internal.h"
 #include "librbd/Operations.h"
 #include "librbd/Utils.h"
+#include "librbd/io/AioCompletion.h"
+#include "librbd/io/ImageRequest.h"
 
 #define dout_subsys ceph_subsys_rbd
 #undef dout_prefix
@@ -38,35 +39,39 @@ struct ExecuteOp : public Context {
   }
 
   void execute(const journal::SnapCreateEvent &_) {
-    image_ctx.operations->execute_snap_create(event.snap_name,
-					      event.snap_namespace,
+    image_ctx.operations->execute_snap_create(event.snap_namespace,
+					      event.snap_name,
                                               on_op_complete,
                                               event.op_tid, false);
   }
 
   void execute(const journal::SnapRemoveEvent &_) {
-    image_ctx.operations->execute_snap_remove(event.snap_name,
+    image_ctx.operations->execute_snap_remove(event.snap_namespace,
+					      event.snap_name,
                                               on_op_complete);
   }
 
   void execute(const journal::SnapRenameEvent &_) {
     image_ctx.operations->execute_snap_rename(event.snap_id,
-                                              event.snap_name,
+                                              event.dst_snap_name,
                                               on_op_complete);
   }
 
   void execute(const journal::SnapProtectEvent &_) {
-    image_ctx.operations->execute_snap_protect(event.snap_name,
+    image_ctx.operations->execute_snap_protect(event.snap_namespace,
+					       event.snap_name,
                                                on_op_complete);
   }
 
   void execute(const journal::SnapUnprotectEvent &_) {
-    image_ctx.operations->execute_snap_unprotect(event.snap_name,
+    image_ctx.operations->execute_snap_unprotect(event.snap_namespace,
+						 event.snap_name,
                                                  on_op_complete);
   }
 
   void execute(const journal::SnapRollbackEvent &_) {
-    image_ctx.operations->execute_snap_rollback(event.snap_name,
+    image_ctx.operations->execute_snap_rollback(event.snap_namespace,
+						event.snap_name,
                                                 no_op_progress_callback,
                                                 on_op_complete);
   }
@@ -114,6 +119,14 @@ struct ExecuteOp : public Context {
 
     ldout(cct, 20) << ": ExecuteOp::" << __func__ << dendl;
     RWLock::RLocker owner_locker(image_ctx.owner_lock);
+
+    if (image_ctx.exclusive_lock == nullptr ||
+        !image_ctx.exclusive_lock->accept_ops()) {
+      ldout(cct, 5) << ": lost exclusive lock -- skipping op" << dendl;
+      on_op_complete->complete(-ECANCELED);
+      return;
+    }
+
     execute(event);
   }
 };
@@ -193,6 +206,14 @@ void Replay<I>::process(const EventEntry &event_entry,
   on_ready = util::create_async_context_callback(m_image_ctx, on_ready);
 
   RWLock::RLocker owner_lock(m_image_ctx.owner_lock);
+  if (m_image_ctx.exclusive_lock == nullptr ||
+      !m_image_ctx.exclusive_lock->accept_ops()) {
+    ldout(cct, 5) << ": lost exclusive lock -- skipping event" << dendl;
+    m_image_ctx.op_work_queue->queue(on_safe, -ECANCELED);
+    on_ready->complete(0);
+    return;
+  }
+
   boost::apply_visitor(EventVisitor(this, on_ready, on_safe),
                        event_entry.event);
 }
@@ -202,7 +223,7 @@ void Replay<I>::shut_down(bool cancel_ops, Context *on_finish) {
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 20) << dendl;
 
-  AioCompletion *flush_comp = nullptr;
+  io::AioCompletion *flush_comp = nullptr;
   on_finish = util::create_async_context_callback(
     m_image_ctx, on_finish);
 
@@ -212,6 +233,7 @@ void Replay<I>::shut_down(bool cancel_ops, Context *on_finish) {
     // safely commit any remaining AIO modify operations
     if ((m_in_flight_aio_flush + m_in_flight_aio_modify) != 0) {
       flush_comp = create_aio_flush_completion(nullptr);
+      assert(flush_comp != nullptr);
     }
 
     for (auto &op_event_pair : m_op_events) {
@@ -236,6 +258,9 @@ void Replay<I>::shut_down(bool cancel_ops, Context *on_finish) {
       }
     }
 
+    assert(!m_shut_down);
+    m_shut_down = true;
+
     assert(m_flush_ctx == nullptr);
     if (m_in_flight_op_events > 0 || flush_comp != nullptr) {
       std::swap(m_flush_ctx, on_finish);
@@ -245,7 +270,7 @@ void Replay<I>::shut_down(bool cancel_ops, Context *on_finish) {
   // execute the following outside of lock scope
   if (flush_comp != nullptr) {
     RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
-    AioImageRequest<I>::aio_flush(&m_image_ctx, flush_comp);
+    io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp, {});
   }
   if (on_finish != nullptr) {
     on_finish->complete(0);
@@ -254,15 +279,18 @@ void Replay<I>::shut_down(bool cancel_ops, Context *on_finish) {
 
 template <typename I>
 void Replay<I>::flush(Context *on_finish) {
-  AioCompletion *aio_comp;
+  io::AioCompletion *aio_comp;
   {
     Mutex::Locker locker(m_lock);
     aio_comp = create_aio_flush_completion(
       util::create_async_context_callback(m_image_ctx, on_finish));
+    if (aio_comp == nullptr) {
+      return;
+    }
   }
 
   RWLock::RLocker owner_locker(m_image_ctx.owner_lock);
-  AioImageRequest<I>::aio_flush(&m_image_ctx, aio_comp);
+  io::ImageRequest<I>::aio_flush(&m_image_ctx, aio_comp, {});
 }
 
 template <typename I>
@@ -311,17 +339,25 @@ void Replay<I>::handle_event(const journal::AioDiscardEvent &event,
   ldout(cct, 20) << ": AIO discard event" << dendl;
 
   bool flush_required;
-  AioCompletion *aio_comp = create_aio_modify_completion(on_ready, on_safe,
-                                                         AIO_TYPE_DISCARD,
-                                                         &flush_required);
-  AioImageRequest<I>::aio_discard(&m_image_ctx, aio_comp, event.offset,
-                                  event.length);
+  auto aio_comp = create_aio_modify_completion(on_ready, on_safe,
+                                               io::AIO_TYPE_DISCARD,
+                                               &flush_required,
+                                               {});
+  if (aio_comp == nullptr) {
+    return;
+  }
+
+  io::ImageRequest<I>::aio_discard(&m_image_ctx, aio_comp, event.offset,
+                                   event.length, event.skip_partial_discard,
+				   {});
   if (flush_required) {
     m_lock.Lock();
-    AioCompletion *flush_comp = create_aio_flush_completion(nullptr);
+    auto flush_comp = create_aio_flush_completion(nullptr);
     m_lock.Unlock();
 
-    AioImageRequest<I>::aio_flush(&m_image_ctx, flush_comp);
+    if (flush_comp != nullptr) {
+      io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp, {});
+    }
   }
 }
 
@@ -333,17 +369,25 @@ void Replay<I>::handle_event(const journal::AioWriteEvent &event,
 
   bufferlist data = event.data;
   bool flush_required;
-  AioCompletion *aio_comp = create_aio_modify_completion(on_ready, on_safe,
-                                                         AIO_TYPE_WRITE,
-                                                         &flush_required);
-  AioImageRequest<I>::aio_write(&m_image_ctx, aio_comp, event.offset,
-                                event.length, data.c_str(), 0);
+  auto aio_comp = create_aio_modify_completion(on_ready, on_safe,
+                                               io::AIO_TYPE_WRITE,
+                                               &flush_required,
+                                               {});
+  if (aio_comp == nullptr) {
+    return;
+  }
+
+  io::ImageRequest<I>::aio_write(&m_image_ctx, aio_comp,
+                                 {{event.offset, event.length}},
+                                 std::move(data), 0, {});
   if (flush_required) {
     m_lock.Lock();
-    AioCompletion *flush_comp = create_aio_flush_completion(nullptr);
+    auto flush_comp = create_aio_flush_completion(nullptr);
     m_lock.Unlock();
 
-    AioImageRequest<I>::aio_flush(&m_image_ctx, flush_comp);
+    if (flush_comp != nullptr) {
+      io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp, {});
+    }
   }
 }
 
@@ -353,14 +397,72 @@ void Replay<I>::handle_event(const journal::AioFlushEvent &event,
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 20) << ": AIO flush event" << dendl;
 
-  AioCompletion *aio_comp;
+  io::AioCompletion *aio_comp;
   {
     Mutex::Locker locker(m_lock);
     aio_comp = create_aio_flush_completion(on_safe);
   }
-  AioImageRequest<I>::aio_flush(&m_image_ctx, aio_comp);
 
+  if (aio_comp != nullptr) {
+    io::ImageRequest<I>::aio_flush(&m_image_ctx, aio_comp, {});
+  }
   on_ready->complete(0);
+}
+
+template <typename I>
+void Replay<I>::handle_event(const journal::AioWriteSameEvent &event,
+                             Context *on_ready, Context *on_safe) {
+  CephContext *cct = m_image_ctx.cct;
+  ldout(cct, 20) << ": AIO writesame event" << dendl;
+
+  bufferlist data = event.data;
+  bool flush_required;
+  auto aio_comp = create_aio_modify_completion(on_ready, on_safe,
+                                               io::AIO_TYPE_WRITESAME,
+                                               &flush_required,
+                                               {});
+  if (aio_comp == nullptr) {
+    return;
+  }
+
+  io::ImageRequest<I>::aio_writesame(&m_image_ctx, aio_comp, event.offset,
+                                     event.length, std::move(data), 0, {});
+  if (flush_required) {
+    m_lock.Lock();
+    auto flush_comp = create_aio_flush_completion(nullptr);
+    m_lock.Unlock();
+
+    if (flush_comp != nullptr) {
+      io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp, {});
+    }
+  }
+}
+
+ template <typename I>
+ void Replay<I>::handle_event(const journal::AioCompareAndWriteEvent &event,
+                              Context *on_ready, Context *on_safe) {
+  CephContext *cct = m_image_ctx.cct;
+  ldout(cct, 20) << ": AIO CompareAndWrite event" << dendl;
+
+  bufferlist cmp_data = event.cmp_data;
+  bufferlist write_data = event.write_data;
+  bool flush_required;
+  auto aio_comp = create_aio_modify_completion(on_ready, on_safe,
+                                               io::AIO_TYPE_COMPARE_AND_WRITE,
+                                               &flush_required,
+                                               {-EILSEQ});
+  io::ImageRequest<I>::aio_compare_and_write(&m_image_ctx, aio_comp,
+                                             {{event.offset, event.length}},
+                                             std::move(cmp_data),
+                                             std::move(write_data),
+                                             nullptr, 0, {});
+  if (flush_required) {
+    m_lock.Lock();
+    auto flush_comp = create_aio_flush_completion(nullptr);
+    m_lock.Unlock();
+
+    io::ImageRequest<I>::aio_flush(&m_image_ctx, flush_comp, {});
+  }
 }
 
 template <typename I>
@@ -643,10 +745,10 @@ void Replay<I>::handle_event(const journal::FlattenEvent &event,
 }
 
 template <typename I>
-void Replay<I>::handle_event(const journal::DemoteEvent &event,
+void Replay<I>::handle_event(const journal::DemotePromoteEvent &event,
 			     Context *on_ready, Context *on_safe) {
   CephContext *cct = m_image_ctx.cct;
-  ldout(cct, 20) << ": Demote event" << dendl;
+  ldout(cct, 20) << ": Demote/Promote event" << dendl;
   on_ready->complete(0);
   on_safe->complete(0);
 }
@@ -669,6 +771,8 @@ void Replay<I>::handle_event(const journal::SnapLimitEvent &event,
     m_image_ctx, new ExecuteOp<I, journal::SnapLimitEvent>(m_image_ctx,
 							   event,
 							   on_op_complete));
+
+  op_event->ignore_error_codes = {-ERANGE};
 
   on_ready->complete(0);
 }
@@ -712,7 +816,8 @@ void Replay<I>::handle_event(const journal::MetadataSetEvent &event,
     return;
   }
 
-  op_event->on_op_finish_event = new C_RefreshIfRequired<I>(
+  on_op_complete = new C_RefreshIfRequired<I>(m_image_ctx, on_op_complete);
+  op_event->on_op_finish_event = util::create_async_context_callback(
     m_image_ctx, new ExecuteOp<I, journal::MetadataSetEvent>(
       m_image_ctx, event, on_op_complete));
 
@@ -733,7 +838,8 @@ void Replay<I>::handle_event(const journal::MetadataRemoveEvent &event,
     return;
   }
 
-  op_event->on_op_finish_event = new C_RefreshIfRequired<I>(
+  on_op_complete = new C_RefreshIfRequired<I>(m_image_ctx, on_op_complete);
+  op_event->on_op_finish_event = util::create_async_context_callback(
     m_image_ctx, new ExecuteOp<I, journal::MetadataRemoveEvent>(
       m_image_ctx, event, on_op_complete));
 
@@ -754,7 +860,7 @@ void Replay<I>::handle_event(const journal::UnknownEvent &event,
 
 template <typename I>
 void Replay<I>::handle_aio_modify_complete(Context *on_ready, Context *on_safe,
-                                           int r) {
+                                           int r, std::set<int> &filters) {
   Mutex::Locker locker(m_lock);
   CephContext *cct = m_image_ctx.cct;
   ldout(cct, 20) << ": on_ready=" << on_ready << ", "
@@ -763,6 +869,10 @@ void Replay<I>::handle_aio_modify_complete(Context *on_ready, Context *on_safe,
   if (on_ready != nullptr) {
     on_ready->complete(0);
   }
+
+  if (filters.find(r) != filters.end())
+    r = 0;
+
   if (r < 0) {
     lderr(cct) << ": AIO modify op failed: " << cpp_strerror(r) << dendl;
     on_safe->complete(r);
@@ -833,6 +943,12 @@ Context *Replay<I>::create_op_context_callback(uint64_t op_tid,
                                                Context *on_safe,
                                                OpEvent **op_event) {
   CephContext *cct = m_image_ctx.cct;
+  if (m_shut_down) {
+    ldout(cct, 5) << ": ignoring event after shut down" << dendl;
+    on_ready->complete(0);
+    m_image_ctx.op_work_queue->queue(on_safe, -ESHUTDOWN);
+    return nullptr;
+  }
 
   assert(m_lock.is_locked());
   if (m_op_events.count(op_tid) != 0) {
@@ -870,7 +986,10 @@ void Replay<I>::handle_op_complete(uint64_t op_tid, int r) {
     op_event = std::move(op_it->second);
     m_op_events.erase(op_it);
 
-    shutting_down = (m_flush_ctx != nullptr);
+    if (m_shut_down) {
+      assert(m_flush_ctx != nullptr);
+      shutting_down = true;
+    }
   }
 
   assert(op_event.on_start_ready == nullptr || (r < 0 && r != -ERESTART));
@@ -922,13 +1041,22 @@ void Replay<I>::handle_op_complete(uint64_t op_tid, int r) {
 }
 
 template <typename I>
-AioCompletion *Replay<I>::create_aio_modify_completion(Context *on_ready,
-                                                       Context *on_safe,
-                                                       aio_type_t aio_type,
-                                                       bool *flush_required) {
+io::AioCompletion *
+Replay<I>::create_aio_modify_completion(Context *on_ready,
+                                        Context *on_safe,
+                                        io::aio_type_t aio_type,
+                                        bool *flush_required,
+                                        std::set<int> &&filters) {
   Mutex::Locker locker(m_lock);
   CephContext *cct = m_image_ctx.cct;
   assert(m_on_aio_ready == nullptr);
+
+  if (m_shut_down) {
+    ldout(cct, 5) << ": ignoring event after shut down" << dendl;
+    on_ready->complete(0);
+    m_image_ctx.op_work_queue->queue(on_safe, -ESHUTDOWN);
+    return nullptr;
+  }
 
   ++m_in_flight_aio_modify;
   m_aio_modify_unsafe_contexts.push_back(on_safe);
@@ -959,23 +1087,32 @@ AioCompletion *Replay<I>::create_aio_modify_completion(Context *on_ready,
   // when the modification is ACKed by librbd, we can process the next
   // event. when flushed, the completion of the next flush will fire the
   // on_safe callback
-  AioCompletion *aio_comp = AioCompletion::create_and_start<Context>(
-    new C_AioModifyComplete(this, on_ready, on_safe),
+  auto aio_comp = io::AioCompletion::create_and_start<Context>(
+    new C_AioModifyComplete(this, on_ready, on_safe, std::move(filters)),
     util::get_image_ctx(&m_image_ctx), aio_type);
   return aio_comp;
 }
 
 template <typename I>
-AioCompletion *Replay<I>::create_aio_flush_completion(Context *on_safe) {
+io::AioCompletion *Replay<I>::create_aio_flush_completion(Context *on_safe) {
   assert(m_lock.is_locked());
+
+  CephContext *cct = m_image_ctx.cct;
+  if (m_shut_down) {
+    ldout(cct, 5) << ": ignoring event after shut down" << dendl;
+    if (on_safe != nullptr) {
+      m_image_ctx.op_work_queue->queue(on_safe, -ESHUTDOWN);
+    }
+    return nullptr;
+  }
 
   ++m_in_flight_aio_flush;
 
   // associate all prior write/discard ops to this flush request
-  AioCompletion *aio_comp = AioCompletion::create_and_start<Context>(
+  auto aio_comp = io::AioCompletion::create_and_start<Context>(
       new C_AioFlushComplete(this, on_safe,
                              std::move(m_aio_modify_unsafe_contexts)),
-      util::get_image_ctx(&m_image_ctx), AIO_TYPE_FLUSH);
+      util::get_image_ctx(&m_image_ctx), io::AIO_TYPE_FLUSH);
   m_aio_modify_unsafe_contexts.clear();
   return aio_comp;
 }

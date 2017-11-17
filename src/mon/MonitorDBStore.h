@@ -320,7 +320,7 @@ class MonitorDBStore
 		    Context *f)
       : store(s), t(t), oncommit(f)
     {}
-    void finish(int r) {
+    void finish(int r) override {
       /* The store serializes writes.  Each transaction is handled
        * sequentially by the io_work Finisher.  If a transaction takes longer
        * to apply its state to permanent storage, then no other transaction
@@ -434,7 +434,7 @@ class MonitorDBStore
 	sync_prefixes(prefixes)
     { }
 
-    virtual ~WholeStoreIteratorImpl() { }
+    ~WholeStoreIteratorImpl() override { }
 
     /**
      * Obtain a chunk of the store
@@ -445,7 +445,7 @@ class MonitorDBStore
      *			    differ from the one passed on to the function)
      * @param last_key[out] Last key in the chunk
      */
-    virtual void get_chunk_tx(TransactionRef tx, uint64_t max) {
+    void get_chunk_tx(TransactionRef tx, uint64_t max) override {
       assert(done == false);
       assert(iter->valid() == true);
 
@@ -463,7 +463,7 @@ class MonitorDBStore
       done = true;
     }
 
-    virtual pair<string,string> get_next_key() {
+    pair<string,string> get_next_key() override {
       assert(iter->valid());
 
       for (; iter->valid(); iter->next()) {
@@ -476,7 +476,7 @@ class MonitorDBStore
       return pair<string,string>();
     }
 
-    virtual bool _is_valid() {
+    bool _is_valid() override {
       return iter->valid();
     }
   };
@@ -484,7 +484,7 @@ class MonitorDBStore
   Synchronizer get_synchronizer(pair<string,string> &key,
 				set<string> &prefixes) {
     KeyValueDB::WholeSpaceIterator iter;
-    iter = db->get_iterator();
+    iter = db->get_wholespace_iterator();
 
     if (!key.first.empty() && !key.second.empty())
       iter->upper_bound(key.first, key.second);
@@ -505,7 +505,7 @@ class MonitorDBStore
 
   KeyValueDB::WholeSpaceIterator get_iterator() {
     KeyValueDB::WholeSpaceIterator iter;
-    iter = db->get_iterator();
+    iter = db->get_wholespace_iterator();
     iter->seek_to_first();
     return iter;
   }
@@ -624,18 +624,34 @@ class MonitorDBStore
       db->init(g_conf->mon_rocksdb_options);
     else
       db->init();
+
+
   }
 
   int open(ostream &out) {
     string kv_type;
     int r = read_meta("kv_backend", &kv_type);
-    if (r < 0 || kv_type.length() == 0)
+    if (r < 0 || kv_type.empty()) {
+      // assume old monitors that did not mark the type were leveldb.
       kv_type = "leveldb";
-
+      r = write_meta("kv_backend", kv_type);
+      if (r < 0)
+	return r;
+    }
     _open(kv_type);
     r = db->open(out);
     if (r < 0)
       return r;
+
+    // Monitors are few in number, so the resource cost of exposing 
+    // very detailed stats is low: ramp up the priority of all the
+    // KV store's perf counters.  Do this after open, because backend may
+    // not have constructed PerfCounters earlier.
+    if (db->get_perf_counters()) {
+      db->get_perf_counters()->set_prio_adjust(
+          PerfCountersBuilder::PRIO_USEFUL - PerfCountersBuilder::PRIO_DEBUGONLY);
+    }
+
     io_work.start();
     is_open = true;
     return 0;
@@ -646,8 +662,7 @@ class MonitorDBStore
     string kv_type;
     int r = read_meta("kv_backend", &kv_type);
     if (r < 0) {
-      // assume old monitors that did not mark the type were leveldb.
-      kv_type = "leveldb";
+      kv_type = g_conf->mon_keyvaluedb;
       r = write_meta("kv_backend", kv_type);
       if (r < 0)
 	return r;

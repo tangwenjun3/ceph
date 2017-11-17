@@ -20,33 +20,38 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <list>
 
 #include "acconfig.h"
-#include "os/fs/FS.h"
+#include "aio.h"
 
 #define SPDK_PREFIX "spdk:"
 
 /// track in-flight io
 struct IOContext {
+private:
+  std::mutex lock;
+  std::condition_variable cond;
+  int r = 0;
+
+public:
   CephContext* cct;
   void *priv;
 #ifdef HAVE_SPDK
   void *nvme_task_first = nullptr;
   void *nvme_task_last = nullptr;
+  std::atomic_int total_nseg = {0};
 #endif
 
-  std::mutex lock;
-  std::condition_variable cond;
 
-  list<FS::aio_t> pending_aios;    ///< not yet submitted
-  list<FS::aio_t> running_aios;    ///< submitting or submitted
+  std::list<aio_t> pending_aios;    ///< not yet submitted
+  std::list<aio_t> running_aios;    ///< submitting or submitted
   std::atomic_int num_pending = {0};
   std::atomic_int num_running = {0};
-  std::atomic_int num_reading = {0};
-  std::atomic_int num_waiting = {0};
+  bool allow_eio;
 
-  explicit IOContext(CephContext* cct, void *p)
-    : cct(cct), priv(p)
+  explicit IOContext(CephContext* cct, void *p, bool allow_eio = false)
+    : cct(cct), priv(p), allow_eio(allow_eio)
     {}
 
   // no copying
@@ -59,11 +64,28 @@ struct IOContext {
 
   void aio_wait();
 
-  void aio_wake() {
-    if (num_waiting.load()) {
+  void try_aio_wake() {
+    if (num_running == 1) {
+
+      // we might have some pending IOs submitted after the check
+      // as there is no lock protection for aio_submit.
+      // Hence we might have false conditional trigger.
+      // aio_wait has to handle that hence do not care here.
       std::lock_guard<std::mutex> l(lock);
       cond.notify_all();
+      --num_running;
+      assert(num_running >= 0);
+    } else {
+      --num_running;
     }
+  }
+
+  void set_return_value(int _r) {
+    r = _r;
+  }
+
+  int get_return_value() const {
+    return r;
   }
 };
 
@@ -71,28 +93,51 @@ struct IOContext {
 class BlockDevice {
 public:
   CephContext* cct;
+  typedef void (*aio_callback_t)(void *handle, void *aio);
 private:
   std::mutex ioc_reap_lock;
-  vector<IOContext*> ioc_reap_queue;
+  std::vector<IOContext*> ioc_reap_queue;
   std::atomic_int ioc_reap_count = {0};
 
 protected:
+  uint64_t size;
+  uint64_t block_size;
   bool rotational = true;
 
 public:
-  BlockDevice(CephContext* cct) : cct(cct) {}
+  aio_callback_t aio_callback;
+  void *aio_callback_priv;
+  BlockDevice(CephContext* cct, aio_callback_t cb, void *cbpriv)
+  : cct(cct),
+    size(0),
+    block_size(0),
+    aio_callback(cb),
+    aio_callback_priv(cbpriv)
+ {}
   virtual ~BlockDevice() = default;
-  typedef void (*aio_callback_t)(void *handle, void *aio);
 
   static BlockDevice *create(
-    CephContext* cct, const string& path, aio_callback_t cb, void *cbpriv);
+    CephContext* cct, const std::string& path, aio_callback_t cb, void *cbpriv);
   virtual bool supported_bdev_label() { return true; }
   virtual bool is_rotational() { return rotational; }
 
   virtual void aio_submit(IOContext *ioc) = 0;
 
-  virtual uint64_t get_size() const = 0;
-  virtual uint64_t get_block_size() const = 0;
+  uint64_t get_size() const { return size; }
+  uint64_t get_block_size() const { return block_size; }
+
+  virtual int collect_metadata(const std::string& prefix, std::map<std::string,std::string> *pm) const = 0;
+
+  virtual int get_devname(string *out) {
+    return -ENOENT;
+  }
+  virtual int get_devices(set<string> *ls) {
+    string s;
+    if (get_devname(&s) == 0) {
+      ls->insert(s);
+    }
+    return 0;
+  }
 
   virtual int read(
     uint64_t off,
@@ -104,6 +149,10 @@ public:
     uint64_t off,
     uint64_t len,
     char *buf,
+    bool buffered) = 0;
+  virtual int write(
+    uint64_t off,
+    bufferlist& bl,
     bool buffered) = 0;
 
   virtual int aio_read(
@@ -123,8 +172,17 @@ public:
 
   // for managing buffered readers/writers
   virtual int invalidate_cache(uint64_t off, uint64_t len) = 0;
-  virtual int open(const string& path) = 0;
+  virtual int open(const std::string& path) = 0;
   virtual void close() = 0;
+
+protected:
+  bool is_valid_io(uint64_t off, uint64_t len) const {
+    return (off % block_size == 0 &&
+            len % block_size == 0 &&
+            len > 0 &&
+            off < size &&
+            off + len <= size);
+  }
 };
 
 #endif //CEPH_OS_BLUESTORE_BLOCKDEVICE_H

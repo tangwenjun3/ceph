@@ -4,17 +4,14 @@
 #define CEPH_FORMATTER_H
 
 #include "include/int_types.h"
+#include "include/buffer_fwd.h"
 
 #include <deque>
-#include <iosfwd>
 #include <list>
 #include <vector>
-#include <sstream>
 #include <stdarg.h>
-#include <string>
+#include <sstream>
 #include <map>
-
-#include "include/buffer_fwd.h"
 
 namespace ceph {
 
@@ -40,6 +37,7 @@ namespace ceph {
     Formatter();
     virtual ~Formatter();
 
+    virtual void enable_line_break() = 0;
     virtual void flush(std::ostream& os) = 0;
     void flush(bufferlist &bl);
     virtual void reset() = 0;
@@ -93,25 +91,26 @@ namespace ceph {
   public:
     explicit JSONFormatter(bool p = false);
 
-    virtual void set_status(int status, const char* status_name) {};
-    virtual void output_header() {};
-    virtual void output_footer() {};
-    void flush(std::ostream& os);
+    void set_status(int status, const char* status_name) override {};
+    void output_header() override {};
+    void output_footer() override {};
+    void enable_line_break() override { m_line_break_enabled = true; }
+    void flush(std::ostream& os) override;
     using Formatter::flush; // don't hide Formatter::flush(bufferlist &bl)
-    void reset();
-    virtual void open_array_section(const char *name);
-    void open_array_section_in_ns(const char *name, const char *ns);
-    void open_object_section(const char *name);
-    void open_object_section_in_ns(const char *name, const char *ns);
-    void close_section();
-    void dump_unsigned(const char *name, uint64_t u);
-    void dump_int(const char *name, int64_t u);
-    void dump_float(const char *name, double d);
-    void dump_string(const char *name, const std::string& s);
-    std::ostream& dump_stream(const char *name);
-    void dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap);
-    int get_len() const;
-    void write_raw_data(const char *data);
+    void reset() override;
+    void open_array_section(const char *name) override;
+    void open_array_section_in_ns(const char *name, const char *ns) override;
+    void open_object_section(const char *name) override;
+    void open_object_section_in_ns(const char *name, const char *ns) override;
+    void close_section() override;
+    void dump_unsigned(const char *name, uint64_t u) override;
+    void dump_int(const char *name, int64_t u) override;
+    void dump_float(const char *name, double d) override;
+    void dump_string(const char *name, const std::string& s) override;
+    std::ostream& dump_stream(const char *name) override;
+    void dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap) override;
+    int get_len() const override;
+    void write_raw_data(const char *data) override;
 
   private:
 
@@ -131,6 +130,7 @@ namespace ceph {
     std::stringstream m_ss, m_pending_string;
     std::list<json_formatter_stack_entry_d> m_stack;
     bool m_is_pending_string;
+    bool m_line_break_enabled = false;
   };
 
   class XMLFormatter : public Formatter {
@@ -138,31 +138,32 @@ namespace ceph {
     static const char *XML_1_DTD;
     XMLFormatter(bool pretty = false, bool lowercased = false, bool underscored = true);
 
-    virtual void set_status(int status, const char* status_name) {}
-    virtual void output_header();
-    virtual void output_footer();
+    void set_status(int status, const char* status_name) override {}
+    void output_header() override;
+    void output_footer() override;
 
-    void flush(std::ostream& os);
+    void enable_line_break() override { m_line_break_enabled = true; }
+    void flush(std::ostream& os) override;
     using Formatter::flush; // don't hide Formatter::flush(bufferlist &bl)
-    void reset();
-    void open_array_section(const char *name);
-    void open_array_section_in_ns(const char *name, const char *ns);
-    void open_object_section(const char *name);
-    void open_object_section_in_ns(const char *name, const char *ns);
-    void close_section();
-    void dump_unsigned(const char *name, uint64_t u);
-    void dump_int(const char *name, int64_t u);
-    void dump_float(const char *name, double d);
-    void dump_string(const char *name, const std::string& s);
-    std::ostream& dump_stream(const char *name);
-    void dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap);
-    int get_len() const;
-    void write_raw_data(const char *data);
+    void reset() override;
+    void open_array_section(const char *name) override;
+    void open_array_section_in_ns(const char *name, const char *ns) override;
+    void open_object_section(const char *name) override;
+    void open_object_section_in_ns(const char *name, const char *ns) override;
+    void close_section() override;
+    void dump_unsigned(const char *name, uint64_t u) override;
+    void dump_int(const char *name, int64_t u) override;
+    void dump_float(const char *name, double d) override;
+    void dump_string(const char *name, const std::string& s) override;
+    std::ostream& dump_stream(const char *name) override;
+    void dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap) override;
+    int get_len() const override;
+    void write_raw_data(const char *data) override;
 
     /* with attrs */
-    void open_array_section_with_attrs(const char *name, const FormatterAttrs& attrs);
-    void open_object_section_with_attrs(const char *name, const FormatterAttrs& attrs);
-    void dump_string_with_attrs(const char *name, const std::string& s, const FormatterAttrs& attrs);
+    void open_array_section_with_attrs(const char *name, const FormatterAttrs& attrs) override;
+    void open_object_section_with_attrs(const char *name, const FormatterAttrs& attrs) override;
+    void dump_string_with_attrs(const char *name, const std::string& s, const FormatterAttrs& attrs) override;
 
   protected:
     void open_section_in_ns(const char *name, const char *ns, const FormatterAttrs *attrs);
@@ -179,37 +180,39 @@ namespace ceph {
     const bool m_underscored;
     std::string m_pending_string_name;
     bool m_header_done;
+    bool m_line_break_enabled = false;
   };
 
   class TableFormatter : public Formatter {
   public:
     explicit TableFormatter(bool keyval = false);
 
-    virtual void set_status(int status, const char* status_name) {};
-    virtual void output_header() {};
-    virtual void output_footer() {};
-    void flush(std::ostream& os);
+    void set_status(int status, const char* status_name) override {};
+    void output_header() override {};
+    void output_footer() override {};
+    void enable_line_break() override {};
+    void flush(std::ostream& os) override;
     using Formatter::flush; // don't hide Formatter::flush(bufferlist &bl)
-    void reset();
-    virtual void open_array_section(const char *name);
-    void open_array_section_in_ns(const char *name, const char *ns);
-    void open_object_section(const char *name);
-    void open_object_section_in_ns(const char *name, const char *ns);
+    void reset() override;
+    void open_array_section(const char *name) override;
+    void open_array_section_in_ns(const char *name, const char *ns) override;
+    void open_object_section(const char *name) override;
+    void open_object_section_in_ns(const char *name, const char *ns) override;
 
-    void open_array_section_with_attrs(const char *name, const FormatterAttrs& attrs);
-    void open_object_section_with_attrs(const char *name, const FormatterAttrs& attrs);
+    void open_array_section_with_attrs(const char *name, const FormatterAttrs& attrs) override;
+    void open_object_section_with_attrs(const char *name, const FormatterAttrs& attrs) override;
 
-    void close_section();
-    void dump_unsigned(const char *name, uint64_t u);
-    void dump_int(const char *name, int64_t u);
-    void dump_float(const char *name, double d);
-    void dump_string(const char *name, const std::string& s);
-    void dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap);
-    void dump_string_with_attrs(const char *name, const std::string& s, const FormatterAttrs& attrs);
-    std::ostream& dump_stream(const char *name);
+    void close_section() override;
+    void dump_unsigned(const char *name, uint64_t u) override;
+    void dump_int(const char *name, int64_t u) override;
+    void dump_float(const char *name, double d) override;
+    void dump_string(const char *name, const std::string& s) override;
+    void dump_format_va(const char *name, const char *ns, bool quoted, const char *fmt, va_list ap) override;
+    void dump_string_with_attrs(const char *name, const std::string& s, const FormatterAttrs& attrs) override;
+    std::ostream& dump_stream(const char *name) override;
 
-    int get_len() const;
-    void write_raw_data(const char *data);
+    int get_len() const override;
+    void write_raw_data(const char *data) override;
     void get_attrs_str(const FormatterAttrs *attrs, std::string& attrs_str);
 
   private:

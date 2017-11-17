@@ -48,10 +48,11 @@ std::ostream& operator<<(std::ostream& os,
 template <typename I>
 SnapshotRemoveRequest<I>::SnapshotRemoveRequest(I &image_ctx,
 						Context *on_finish,
+						const cls::rbd::SnapshotNamespace &snap_namespace,
 						const std::string &snap_name,
 						uint64_t snap_id)
-  : Request<I>(image_ctx, on_finish), m_snap_name(snap_name),
-    m_snap_id(snap_id) {
+  : Request<I>(image_ctx, on_finish), m_snap_namespace(snap_namespace),
+    m_snap_name(snap_name), m_snap_id(snap_id), m_state(STATE_REMOVE_OBJECT_MAP) {
 }
 
 template <typename I>
@@ -87,7 +88,7 @@ bool SnapshotRemoveRequest<I>::should_complete(int r) {
     finished = true;
     break;
   default:
-    assert(false);
+    ceph_abort();
     break;
   }
 
@@ -106,13 +107,13 @@ void SnapshotRemoveRequest<I>::send_remove_object_map() {
     if (image_ctx.snap_info.find(m_snap_id) == image_ctx.snap_info.end()) {
       lderr(cct) << this << " " << __func__ << ": snapshot doesn't exist"
                  << dendl;
+      m_state = STATE_ERROR;
       this->async_complete(-ENOENT);
       return;
     }
 
     if (image_ctx.object_map != nullptr) {
       ldout(cct, 5) << this << " " << __func__ << dendl;
-      m_state = STATE_REMOVE_OBJECT_MAP;
 
       image_ctx.object_map->snapshot_remove(
         m_snap_id, this->create_callback_context());
@@ -132,7 +133,7 @@ void SnapshotRemoveRequest<I>::send_remove_child() {
     RWLock::RLocker snap_locker(image_ctx.snap_lock);
     RWLock::RLocker parent_locker(image_ctx.parent_lock);
 
-    parent_spec our_pspec;
+    ParentSpec our_pspec;
     int r = image_ctx.get_parent_spec(m_snap_id, &our_pspec);
     if (r < 0) {
       if (r == -ENOENT) {
@@ -203,7 +204,7 @@ void SnapshotRemoveRequest<I>::send_release_snap_id() {
 
   librados::AioCompletion *rados_completion =
     this->create_callback_completion();
-  image_ctx.md_ctx.aio_selfmanaged_snap_remove(m_snap_id, rados_completion);
+  image_ctx.data_ctx.aio_selfmanaged_snap_remove(m_snap_id, rados_completion);
   rados_completion->release();
 }
 
@@ -214,11 +215,11 @@ void SnapshotRemoveRequest<I>::remove_snap_context() {
   ldout(cct, 5) << this << " " << __func__ << dendl;
 
   RWLock::WLocker snap_locker(image_ctx.snap_lock);
-  image_ctx.rm_snap(m_snap_name, m_snap_id);
+  image_ctx.rm_snap(m_snap_namespace, m_snap_name, m_snap_id);
 }
 
 template <typename I>
-int SnapshotRemoveRequest<I>::scan_for_parents(parent_spec &pspec) {
+int SnapshotRemoveRequest<I>::scan_for_parents(ParentSpec &pspec) {
   I &image_ctx = this->m_image_ctx;
   assert(image_ctx.snap_lock.is_locked());
   assert(image_ctx.parent_lock.is_locked());

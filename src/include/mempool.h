@@ -14,19 +14,15 @@
 
 #ifndef _CEPH_INCLUDE_MEMPOOL_H
 #define _CEPH_INCLUDE_MEMPOOL_H
-#include <iostream>
-#include <fstream>
 
 #include <cstddef>
 #include <map>
 #include <unordered_map>
 #include <set>
 #include <vector>
-#include <assert.h>
 #include <list>
 #include <mutex>
 #include <atomic>
-#include <climits>
 #include <typeinfo>
 
 #include <common/Formatter.h>
@@ -66,15 +62,15 @@ automatically created (name is same as in DEFINE_MEMORY_POOLS_HELPER).
 That namespace contains a set of common STL containers that are predefined
 with the appropriate allocators.
 
-Thus for mempool "unittest_1" we have automatically available to us:
+Thus for mempool "osd" we have automatically available to us:
 
-   mempool::unittest_1::map
-   mempool::unittest_1::multimap
-   mempool::unittest_1::set
-   mempool::unittest_1::multiset
-   mempool::unittest_1::list
-   mempool::unittest_1::vector
-   mempool::unittest_1::unordered_map
+   mempool::osd::map
+   mempool::osd::multimap
+   mempool::osd::set
+   mempool::osd::multiset
+   mempool::osd::list
+   mempool::osd::vector
+   mempool::osd::unordered_map
 
 
 Putting objects in a mempool
@@ -92,7 +88,7 @@ For a class:
 
 Then, in an appropriate .cc file,
 
-  MEMPOOL_DEFINE_OBJECT_FACTORY(Foo, foo, unittest_1);
+  MEMPOOL_DEFINE_OBJECT_FACTORY(Foo, foo, osd);
 
 The second argument can generally be identical to the first, except
 when the type contains a nested scope.  For example, for
@@ -104,10 +100,16 @@ BlueStore::Onode, we need to do
 (This is just because we need to name some static variables and we
 can't use :: in a variable name.)
 
+XXX Note: the new operator hard-codes the allocation size to the size of the
+object given in MEMPOOL_DEFINE_OBJECT_FACTORY. For this reason, you cannot
+incorporate mempools into a base class without also defining a helper/factory
+for the child class as well (as the base class is usually smaller than the
+child class).
+
 In order to use the STL containers, simply use the namespaced variant
 of the container type.  For example,
 
-  mempool::unittest_1::map<int> myvec;
+  mempool::osd::map<int> myvec;
 
 Introspection
 -------------
@@ -141,13 +143,24 @@ namespace mempool {
 
 #define DEFINE_MEMORY_POOLS_HELPER(f) \
   f(bloom_filter)		      \
-  f(bluestore_meta_onode)	      \
-  f(bluestore_meta_other)	      \
   f(bluestore_alloc)		      \
+  f(bluestore_cache_data)	      \
+  f(bluestore_cache_onode)	      \
+  f(bluestore_cache_other)	      \
+  f(bluestore_fsck)		      \
+  f(bluestore_txc)		      \
+  f(bluestore_writing_deferred)	      \
+  f(bluestore_writing)		      \
   f(bluefs)			      \
+  f(buffer_anon)		      \
   f(buffer_meta)		      \
-  f(buffer_data)		      \
   f(osd)			      \
+  f(osd_mapbl)			      \
+  f(osd_pglog)			      \
+  f(osdmap)			      \
+  f(osdmap_mapping)		      \
+  f(pgmap)			      \
+  f(mds_co)			      \
   f(unittest_1)			      \
   f(unittest_2)
 
@@ -191,6 +204,12 @@ struct stats_t {
     f->dump_int("items", items);
     f->dump_int("bytes", bytes);
   }
+
+  stats_t& operator+=(const stats_t& o) {
+    items += o.items;
+    bytes += o.bytes;
+    return *this;
+  }
 };
 
 pool_t& get_pool(pool_index_t ix);
@@ -221,6 +240,8 @@ public:
   size_t allocated_bytes() const;
   size_t allocated_items() const;
 
+  void adjust_count(ssize_t items, ssize_t bytes);
+
   shard_t* pick_a_shard() {
     // Dirt cheap, see:
     //   http://fossies.org/dox/glibc-2.24/pthread__self_8c_source.html
@@ -245,11 +266,10 @@ public:
   void get_stats(stats_t *total,
 		 std::map<std::string, stats_t> *by_type) const;
 
-  void dump(ceph::Formatter *f) const;
+  void dump(ceph::Formatter *f, stats_t *ptotal=0) const;
 };
 
-// skip unittest_[12] by default
-void dump(ceph::Formatter *f, size_t skip=2);
+void dump(ceph::Formatter *f);
 
 
 // STL allocator for use with containers.  All actual state
@@ -375,11 +395,12 @@ public:
                                                                         \
     template<typename k,typename v, typename cmp = std::less<k> >	\
     using map = std::map<k, v, cmp,					\
-			 pool_allocator<std::pair<k,v>>>;		\
+			 pool_allocator<std::pair<const k,v>>>;		\
                                                                         \
     template<typename k,typename v, typename cmp = std::less<k> >	\
     using multimap = std::multimap<k,v,cmp,				\
-				   pool_allocator<std::pair<k,v>>>;	\
+				   pool_allocator<std::pair<const k,	\
+							    v>>>;	\
                                                                         \
     template<typename k, typename cmp = std::less<k> >			\
     using set = std::set<k,cmp,pool_allocator<k>>;			\
@@ -394,7 +415,7 @@ public:
 	     typename h=std::hash<k>,					\
 	     typename eq = std::equal_to<k>>				\
     using unordered_map =						\
-      std::unordered_map<k,v,h,eq,pool_allocator<std::pair<k,v>>>;	\
+      std::unordered_map<k,v,h,eq,pool_allocator<std::pair<const k,v>>>;\
                                                                         \
     inline size_t allocated_bytes() {					\
       return mempool::get_pool(id).allocated_bytes();			\
@@ -410,7 +431,40 @@ DEFINE_MEMORY_POOLS_HELPER(P)
 
 };
 
+// the elements allocated by mempool is in the same memory space as the ones
+// allocated by the default allocator. so compare them in an efficient way:
+// libstdc++'s std::equal is specialized to use memcmp if T is integer or
+// pointer. this is good enough for our usecase. use
+// std::is_trivially_copyable<T> to expand the support to more types if
+// nececssary.
+template<typename T, mempool::pool_index_t pool_index>
+bool operator==(const std::vector<T, std::allocator<T>>& lhs,
+		const std::vector<T, mempool::pool_allocator<pool_index, T>>& rhs)
+{
+  return (lhs.size() == rhs.size() &&
+	  std::equal(lhs.begin(), lhs.end(), rhs.begin()));
+}
 
+template<typename T, mempool::pool_index_t pool_index>
+bool operator!=(const std::vector<T, std::allocator<T>>& lhs,
+		const std::vector<T, mempool::pool_allocator<pool_index, T>>& rhs)
+{
+  return !(lhs == rhs);
+}
+
+template<typename T, mempool::pool_index_t pool_index>
+bool operator==(const std::vector<T, mempool::pool_allocator<pool_index, T>>& lhs,
+		const std::vector<T, std::allocator<T>>& rhs)
+{
+  return rhs == lhs;
+}
+
+template<typename T, mempool::pool_index_t pool_index>
+bool operator!=(const std::vector<T, mempool::pool_allocator<pool_index, T>>& lhs,
+		const std::vector<T, std::allocator<T>>& rhs)
+{
+  return !(lhs == rhs);
+}
 
 // Use this for any type that is contained by a container (unless it
 // is a class you defined; see below).

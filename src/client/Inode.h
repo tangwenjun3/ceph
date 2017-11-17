@@ -7,6 +7,7 @@
 #include "include/types.h"
 #include "include/xlist.h"
 
+#include "mds/flock.h"
 #include "mds/mdstypes.h" // hrm
 
 #include "osdc/ObjectCacher.h"
@@ -21,9 +22,9 @@ class Dentry;
 class Dir;
 struct SnapRealm;
 struct Inode;
-class ceph_lock_state_t;
 class MetaRequest;
 class filepath;
+class Fh;
 
 struct Cap {
   MetaSession *session;
@@ -222,10 +223,12 @@ struct Inode {
   }
 
   // file locks
-  ceph_lock_state_t *fcntl_locks;
-  ceph_lock_state_t *flock_locks;
+  std::unique_ptr<ceph_lock_state_t> fcntl_locks;
+  std::unique_ptr<ceph_lock_state_t> flock_locks;
 
   xlist<MetaRequest*> unsafe_ops;
+
+  std::set<Fh*> fhs;
 
   Inode(Client *c, vinodeno_t vino, file_layout_t *newlayout)
     : client(c), ino(vino.ino), snapid(vino.snapid), faked_ino(0),
@@ -242,9 +245,7 @@ struct Inode {
       snaprealm(0), snaprealm_item(this),
       oset((void *)this, newlayout->pool_id, this->ino),
       reported_size(0), wanted_max_size(0), requested_max_size(0),
-      _ref(0), ll_ref(0), dn_set(),
-      fcntl_locks(NULL), flock_locks(NULL),
-      async_err(0)
+      _ref(0), ll_ref(0), dn_set()
   {
     memset(&dir_layout, 0, sizeof(dir_layout));
     memset(&quota, 0, sizeof(quota));
@@ -286,9 +287,9 @@ struct Inode {
   bool have_valid_size();
   Dir *open_dir();
 
-  // Record errors to be exposed in fclose/fflush
-  int async_err;
-
+  void add_fh(Fh *f) {fhs.insert(f);}
+  void rm_fh(Fh *f) {fhs.erase(f);}
+  void set_async_err(int r);
   void dump(Formatter *f) const;
 };
 

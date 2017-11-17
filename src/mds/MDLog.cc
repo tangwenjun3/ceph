@@ -33,8 +33,6 @@
 
 #define dout_context g_ceph_context
 #define dout_subsys ceph_subsys_mds
-#undef DOUT_COND
-#define DOUT_COND(cct, l) l<=cct->_conf->debug_mds || l <= cct->_conf->debug_mds_log
 #undef dout_prefix
 #define dout_prefix *_dout << "mds." << mds->get_nodeid() << ".log "
 
@@ -55,11 +53,11 @@ void MDLog::create_logger()
   PerfCountersBuilder plb(g_ceph_context, "mds_log", l_mdl_first, l_mdl_last);
 
   plb.add_u64_counter(l_mdl_evadd, "evadd",
-      "Events submitted", "subm");
+      "Events submitted", "subm", PerfCountersBuilder::PRIO_INTERESTING);
   plb.add_u64_counter(l_mdl_evex, "evex", "Total expired events");
   plb.add_u64_counter(l_mdl_evtrm, "evtrm", "Trimmed events");
   plb.add_u64(l_mdl_ev, "ev",
-      "Events", "evts");
+      "Events", "evts", PerfCountersBuilder::PRIO_INTERESTING);
   plb.add_u64(l_mdl_evexg, "evexg", "Expiring events");
   plb.add_u64(l_mdl_evexd, "evexd", "Current expired events");
 
@@ -67,7 +65,7 @@ void MDLog::create_logger()
   plb.add_u64_counter(l_mdl_segex, "segex", "Total expired segments");
   plb.add_u64_counter(l_mdl_segtrm, "segtrm", "Trimmed segments");
   plb.add_u64(l_mdl_seg, "seg",
-      "Segments", "segs");
+      "Segments", "segs", PerfCountersBuilder::PRIO_INTERESTING);
   plb.add_u64(l_mdl_segexg, "segexg", "Expiring segments");
   plb.add_u64(l_mdl_segexd, "segexd", "Current expired segments");
 
@@ -157,10 +155,9 @@ void MDLog::create(MDSInternalContextBase *c)
 
   // Instantiate Journaler and start async write to RADOS
   assert(journaler == NULL);
-  journaler = new Journaler(ino, mds->mdsmap->get_metadata_pool(), CEPH_FS_ONDISK_MAGIC, mds->objecter,
-			    logger, l_mdl_jlat,
-			    &mds->timer,
-                            mds->finisher);
+  journaler = new Journaler("mdlog", ino, mds->mdsmap->get_metadata_pool(),
+                            CEPH_FS_ONDISK_MAGIC, mds->objecter, logger,
+                            l_mdl_jlat, mds->finisher);
   assert(journaler->is_readonly());
   journaler->set_write_error_handler(new C_MDL_WriteError(this));
   journaler->set_writeable();
@@ -280,14 +277,6 @@ void MDLog::_submit_entry(LogEvent *le, MDSLogContextBase *c)
 
   assert(le == cur_event);
   cur_event = NULL;
-
-  if (!g_conf->mds_log) {
-    // hack: log is disabled.
-    if (c) {
-      mds->finisher->queue(c, 0);
-    }
-    return;
-  }
 
   // let the event register itself in the segment
   assert(!segments.empty());
@@ -447,12 +436,6 @@ void MDLog::_submit_thread()
 
 void MDLog::wait_for_safe(MDSInternalContextBase *c)
 {
-  if (!g_conf->mds_log) {
-    // hack: bypass.
-    c->complete(0);
-    return;
-  }
-
   submit_mutex.Lock();
 
   bool no_pending = true;
@@ -619,22 +602,28 @@ void MDLog::trim(int m)
   utime_t stop = ceph_clock_now();
   stop += 2.0;
 
+  int op_prio = CEPH_MSG_PRIO_LOW +
+		(CEPH_MSG_PRIO_HIGH - CEPH_MSG_PRIO_LOW) *
+		expiring_segments.size() / max_segments;
+  if (op_prio > CEPH_MSG_PRIO_HIGH)
+    op_prio = CEPH_MSG_PRIO_HIGH;
+
+  unsigned new_expiring_segments = 0;
+
   map<uint64_t,LogSegment*>::iterator p = segments.begin();
-  while (p != segments.end() &&
-	 ((max_events >= 0 &&
-	   num_events - expiring_events - expired_events > max_events) ||
-	  (segments.size() - expiring_segments.size() - expired_segments.size() > max_segments))) {
-    
+  while (p != segments.end()) {
     if (stop < ceph_clock_now())
       break;
 
-    int num_expiring_segments = (int)expiring_segments.size();
-    if (num_expiring_segments >= g_conf->mds_log_max_expiring)
+    unsigned num_remaining_segments = (segments.size() - expired_segments.size() - expiring_segments.size());
+    if ((num_remaining_segments <= max_segments) &&
+	(max_events < 0 || num_events - expiring_events - expired_events <= max_events))
       break;
 
-    int op_prio = CEPH_MSG_PRIO_LOW +
-		  (CEPH_MSG_PRIO_HIGH - CEPH_MSG_PRIO_LOW) *
-		  num_expiring_segments / g_conf->mds_log_max_expiring;
+    // Do not trim too many segments at once for peak workload. If mds keeps creating N segments each tick,
+    // the upper bound of 'num_remaining_segments - max_segments' is '2 * N'
+    if (new_expiring_segments * 2 > num_remaining_segments)
+      break;
 
     // look at first segment
     LogSegment *ls = p->second;
@@ -655,6 +644,7 @@ void MDLog::trim(int m)
 	      << ", " << ls->num_events << " events" << dendl;
     } else {
       assert(expiring_segments.count(ls) == 0);
+      new_expiring_segments++;
       expiring_segments.insert(ls);
       expiring_events += ls->num_events;
       submit_mutex.Unlock();
@@ -799,9 +789,11 @@ void MDLog::_trim_expired_segments()
     // this was the oldest segment, adjust expire pos
     if (journaler->get_expire_pos() < ls->end) {
       journaler->set_expire_pos(ls->end);
+      logger->set(l_mdl_expos, ls->end);
+    } else {
+      logger->set(l_mdl_expos, ls->offset);
     }
     
-    logger->set(l_mdl_expos, ls->offset);
     logger->inc(l_mdl_segtrm);
     logger->inc(l_mdl_evtrm, ls->num_events);
     
@@ -864,7 +856,7 @@ void MDLog::replay(MDSInternalContextBase *c)
   // empty?
   if (journaler->get_read_pos() == journaler->get_write_pos()) {
     dout(10) << "replay - journal empty, done." << dendl;
-    mds->mdcache->trim(-1);
+    mds->mdcache->trim();
     if (c) {
       c->complete(0);
     }
@@ -920,7 +912,7 @@ void MDLog::_recovery_thread(MDSInternalContextBase *completion)
   // If the pointer object is not present, then create it with
   // front = default ino and back = null
   JournalPointer jp(mds->get_nodeid(), mds->mdsmap->get_metadata_pool());
-  int const read_result = jp.load(mds->objecter);
+  const int read_result = jp.load(mds->objecter);
   if (read_result == -ENOENT) {
     inodeno_t const default_log_ino = MDS_INO_LOG_OFFSET + mds->get_nodeid();
     jp.front = default_log_ino;
@@ -954,8 +946,9 @@ void MDLog::_recovery_thread(MDSInternalContextBase *completion)
     }
     dout(1) << "Erasing journal " << jp.back << dendl;
     C_SaferCond erase_waiter;
-    Journaler back(jp.back, mds->mdsmap->get_metadata_pool(), CEPH_FS_ONDISK_MAGIC,
-        mds->objecter, logger, l_mdl_jlat, &mds->timer, mds->finisher);
+    Journaler back("mdlog", jp.back, mds->mdsmap->get_metadata_pool(),
+        CEPH_FS_ONDISK_MAGIC, mds->objecter, logger, l_mdl_jlat,
+        mds->finisher);
 
     // Read all about this journal (header + extents)
     C_SaferCond recover_wait;
@@ -992,8 +985,9 @@ void MDLog::_recovery_thread(MDSInternalContextBase *completion)
   }
 
   /* Read the header from the front journal */
-  Journaler *front_journal = new Journaler(jp.front, mds->mdsmap->get_metadata_pool(),
-      CEPH_FS_ONDISK_MAGIC, mds->objecter, logger, l_mdl_jlat, &mds->timer, mds->finisher);
+  Journaler *front_journal = new Journaler("mdlog", jp.front,
+      mds->mdsmap->get_metadata_pool(), CEPH_FS_ONDISK_MAGIC, mds->objecter,
+      logger, l_mdl_jlat, mds->finisher);
 
   // Assign to ::journaler so that we can be aborted by ::shutdown while
   // waiting for journaler recovery
@@ -1078,8 +1072,8 @@ void MDLog::_reformat_journal(JournalPointer const &jp_in, Journaler *old_journa
   assert(write_result == 0);
 
   /* Create the new Journaler file */
-  Journaler *new_journal = new Journaler(jp.back, mds->mdsmap->get_metadata_pool(),
-      CEPH_FS_ONDISK_MAGIC, mds->objecter, logger, l_mdl_jlat, &mds->timer, mds->finisher);
+  Journaler *new_journal = new Journaler("mdlog", jp.back,
+      mds->mdsmap->get_metadata_pool(), CEPH_FS_ONDISK_MAGIC, mds->objecter, logger, l_mdl_jlat, mds->finisher);
   dout(4) << "Writing new journal header " << jp.back << dendl;
   file_layout_t new_layout = old_journal->get_layout();
   new_journal->set_writeable();
@@ -1459,7 +1453,7 @@ void MDLog::standby_trim_segments()
 
   if (removed_segment) {
     dout(20) << " calling mdcache->trim!" << dendl;
-    mds->mdcache->trim(-1);
+    mds->mdcache->trim();
   } else {
     dout(20) << " removed no segments!" << dendl;
   }

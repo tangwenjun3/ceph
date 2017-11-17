@@ -2,17 +2,10 @@
 // vim: ts=8 sw=2 smarttab
 
 #include "Graylog.h"
-
-#include <iostream>
-#include <sstream>
-
-#include <arpa/inet.h>
-
 #include "common/Formatter.h"
 #include "common/LogEntry.h"
 #include "log/Entry.h"
 #include "log/SubsystemMap.h"
-#include "include/uuid.h"
 
 namespace ceph {
 namespace logging {
@@ -84,7 +77,8 @@ void Graylog::log_entry(Entry const * const e)
     m_formatter->dump_string("host", m_hostname);
     m_formatter->dump_string("short_message", s);
     m_formatter->dump_string("_app", "ceph");
-    m_formatter->dump_float("timestamp", e->m_stamp.sec() + (e->m_stamp.usec() / 1000000.0));
+    auto t = ceph::logging::log_clock::to_timeval(e->m_stamp);
+    m_formatter->dump_float("timestamp", t.tv_sec + (t.tv_usec / 1000000.0));
     m_formatter->dump_unsigned("_thread", (uint64_t)e->m_thread);
     m_formatter->dump_int("_level", e->m_prio);
     if (m_subs != NULL)

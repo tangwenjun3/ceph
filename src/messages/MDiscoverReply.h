@@ -70,20 +70,20 @@ class MDiscoverReply : public Message {
   // info about original request
   inodeno_t base_ino;
   frag_t base_dir_frag;  
-  bool wanted_base_dir;
-  bool wanted_xlocked;
+  bool wanted_base_dir = false;
+  bool wanted_xlocked = false;
   snapid_t wanted_snapid;
 
   // and the response
-  bool flag_error_dn;
-  bool flag_error_dir;
+  bool flag_error_dn = false;
+  bool flag_error_dir = false;
   std::string error_dentry;   // dentry that was not found (to trigger waiters on asker)
-  bool unsolicited;
+  bool unsolicited = false;
 
-  mds_rank_t dir_auth_hint;
+  mds_rank_t dir_auth_hint = 0;
 
  public:
-  __u8 starts_with;
+  __u8 starts_with = 0;
   bufferlist trace;
 
   enum { DIR, DENTRY, INODE };
@@ -141,11 +141,11 @@ class MDiscoverReply : public Message {
     header.tid = 0;
   }
 private:
-  ~MDiscoverReply() {}
+  ~MDiscoverReply() override {}
 
 public:
-  const char *get_type_name() const { return "discover_reply"; }
-  void print(ostream& out) const {
+  const char *get_type_name() const override { return "discover_reply"; }
+  void print(ostream& out) const override {
     out << "discover_reply(" << header.tid << " " << base_ino << ")";
   }
   
@@ -174,7 +174,7 @@ public:
 
 
   // ...
-  virtual void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(base_ino, p);
     ::decode(base_dir_frag, p);
@@ -190,7 +190,7 @@ public:
     ::decode(starts_with, p);
     ::decode(trace, p);
   }
-  void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(base_ino, payload);
     ::encode(base_dir_frag, payload);
     ::encode(wanted_base_dir, payload);

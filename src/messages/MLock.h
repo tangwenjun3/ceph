@@ -20,11 +20,11 @@
 #include "mds/locks.h"
 
 class MLock : public Message {
-  int32_t     action;  // action type
-  int32_t     asker;  // who is initiating this request
+  int32_t     action = 0;  // action type
+  int32_t     asker = 0;  // who is initiating this request
   metareqid_t reqid;  // for remote lock requests
   
-  __u16      lock_type;  // lock object type
+  __u16      lock_type = 0;  // lock object type
   MDSCacheObjectInfo object_info;  
   
   bufferlist lockdata;  // and possibly some data
@@ -56,11 +56,11 @@ public:
     lockdata.claim(bl);
   }
 private:
-  ~MLock() {}
+  ~MLock() override {}
   
 public:
-  const char *get_type_name() const { return "ILock"; }
-  void print(ostream& out) const {
+  const char *get_type_name() const override { return "ILock"; }
+  void print(ostream& out) const override {
     out << "lock(a=" << get_lock_action_name(action)
 	<< " " << get_lock_type_name(lock_type)
 	<< " " << object_info
@@ -72,7 +72,7 @@ public:
     this->lockdata = lockdata;
   }
   
-  void decode_payload() {
+  void decode_payload() override {
     bufferlist::iterator p = payload.begin();
     ::decode(asker, p);
     ::decode(action, p);
@@ -81,7 +81,7 @@ public:
     ::decode(object_info, p);
     ::decode(lockdata, p);
   }
-  virtual void encode_payload(uint64_t features) {
+  void encode_payload(uint64_t features) override {
     ::encode(asker, payload);
     ::encode(action, payload);
     ::encode(reqid, payload);

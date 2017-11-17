@@ -36,8 +36,6 @@ ostream& CDentry::print_db_line_prefix(ostream& out)
   return out << ceph_clock_now() << " mds." << dir->cache->mds->get_nodeid() << ".cache.den(" << dir->ino() << " " << name << ") ";
 }
 
-boost::pool<> CDentry::pool(sizeof(CDentry));
-
 LockType CDentry::lock_type(CEPH_LOCK_DN);
 LockType CDentry::versionlock_type(CEPH_LOCK_DVERSION);
 
@@ -90,7 +88,9 @@ ostream& operator<<(ostream& out, const CDentry& dn)
 
   out << " inode=" << dn.get_linkage()->get_inode();
 
-  if (dn.is_new()) out << " state=new";
+  out << " state=" << dn.get_state();
+  if (dn.is_new()) out << "|new";
+  if (dn.state_test(CDentry::STATE_BOTTOMLRU)) out << "|bottomlru";
 
   if (dn.get_num_ref()) {
     out << " |";
@@ -249,6 +249,18 @@ void CDentry::unlink_remote(CDentry::linkage_t *dnl)
   dnl->inode = 0;
 }
 
+void CDentry::push_projected_linkage()
+{
+  _project_linkage();
+
+  if (is_auth()) {
+    CInode *diri = dir->inode;
+    if (diri->is_stray())
+      diri->mdcache->notify_stray_removed();
+  }
+}
+
+
 void CDentry::push_projected_linkage(CInode *inode)
 {
   // dirty rstat tracking is in the projected plane
@@ -261,6 +273,12 @@ void CDentry::push_projected_linkage(CInode *inode)
 
   if (dirty_rstat)
     inode->mark_dirty_rstat();
+
+  if (is_auth()) {
+    CInode *diri = dir->inode;
+    if (diri->is_stray())
+      diri->mdcache->notify_stray_created();
+  }
 }
 
 CDentry::linkage_t *CDentry::pop_projected_linkage()
@@ -384,15 +402,18 @@ void CDentry::decode_replica(bufferlist::iterator& p, bool is_new)
 
   inodeno_t rino;
   unsigned char rdtype;
-  __s32 ls;
   ::decode(rino, p);
   ::decode(rdtype, p);
-  ::decode(ls, p);
+  lock.decode_state(p, is_new);
+
+  bool need_recover;
+  ::decode(need_recover, p);
 
   if (is_new) {
     if (rino)
       dir->link_remote_inode(this, rino, rdtype);
-    lock.set_state(ls);
+    if (need_recover)
+      lock.mark_need_recover();
   }
 }
 
@@ -478,12 +499,13 @@ ClientLease *CDentry::add_client_lease(client_t c, Session *session)
     l = client_lease_map[c];
   else {
     dout(20) << "add_client_lease client." << c << " on " << lock << dendl;
-    if (client_lease_map.empty())
+    if (client_lease_map.empty()) {
       get(PIN_CLIENTLEASE);
+      lock.get_client_lease();
+    }
     l = client_lease_map[c] = new ClientLease(c, this);
     l->seq = ++session->lease_seq;
   
-    lock.get_client_lease();
   }
   
   return l;
@@ -496,17 +518,17 @@ void CDentry::remove_client_lease(ClientLease *l, Locker *locker)
   bool gather = false;
 
   dout(20) << "remove_client_lease client." << l->client << " on " << lock << dendl;
-  lock.put_client_lease();
-  if (lock.get_num_client_lease() == 0 && !lock.is_stable())
-    gather = true;
 
   client_lease_map.erase(l->client);
   l->item_lease.remove_myself();
   l->item_session_lease.remove_myself();
   delete l;
 
-  if (client_lease_map.empty())
+  if (client_lease_map.empty()) {
+    gather = !lock.is_stable();
+    lock.put_client_lease();
     put(PIN_CLIENTLEASE);
+  }
 
   if (gather)
     locker->eval_gather(&lock);
@@ -602,3 +624,5 @@ std::string CDentry::linkage_t::get_remote_d_type_string() const
     default: ceph_abort(); return "";
   }
 }
+
+MEMPOOL_DEFINE_OBJECT_FACTORY(CDentry, co_dentry, mds_co);
