@@ -8550,8 +8550,10 @@ void BlueStore::_kv_sync_thread()
 	} else if (deferred_aggressive) {
 	  force_flush = true;
 	}
-      } else
-	force_flush = true;
+      } else {
+      	if(aios > 0 || deferred_done.size() > 0)
+	  force_flush = true;
+      }
 
       if (force_flush) {
 	dout(20) << __func__ << " num_aios=" << aios
