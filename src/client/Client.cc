@@ -6769,7 +6769,7 @@ force_request:
   }
   if (mask & CEPH_SETATTR_MTIME) {
     req->head.args.setattr.mtime = utime_t(stx->stx_mtime);
-    req->inode_drop |= CEPH_CAP_AUTH_SHARED | CEPH_CAP_FILE_RD |
+    req->inode_drop |= CEPH_CAP_FILE_SHARED | CEPH_CAP_FILE_RD |
       CEPH_CAP_FILE_WR;
   }
   if (mask & CEPH_SETATTR_ATIME) {
@@ -6786,7 +6786,7 @@ force_request:
       ldout(cct,10) << "unable to set size to " << stx->stx_size << ". Too large!" << dendl;
       return -EFBIG;
     }
-    req->inode_drop |= CEPH_CAP_AUTH_SHARED | CEPH_CAP_FILE_RD |
+    req->inode_drop |= CEPH_CAP_FILE_SHARED | CEPH_CAP_FILE_RD |
       CEPH_CAP_FILE_WR;
   }
   req->head.args.setattr.mask = mask;
@@ -7765,10 +7765,10 @@ int Client::readdir_r_cb(dir_result_t *d, add_dirent_cb_t cb, void *p,
     if (diri->dn_set.empty())
       in = diri;
     else
-      in = diri->get_first_parent()->inode;
+      in = diri->get_first_parent()->dir->parent_inode;
 
     int r;
-    r = _getattr(diri, caps, dirp->perms);
+    r = _getattr(in, caps, dirp->perms);
     if (r < 0)
       return r;
 
